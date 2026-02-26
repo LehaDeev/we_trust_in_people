@@ -1,8 +1,8 @@
 """
-Data loading utilities for the ML pipeline.
+Утилиты загрузки данных для ML-pipeline.
 
-Loads OHLCV candle data from PostgreSQL via async SQLAlchemy
-and returns pandas DataFrames ready for feature engineering.
+Загружает OHLCV свечи из PostgreSQL через async SQLAlchemy
+и возвращает pandas DataFrame, готовые для вычисления признаков.
 """
 import pandas as pd
 from sqlalchemy import select
@@ -17,16 +17,16 @@ async def load_ticker_data(
     interval: str = "1h",
 ) -> pd.DataFrame:
     """
-    Load all candles for a ticker from the database.
+    Загрузить все свечи для тикера из базы данных.
 
-    Args:
-        ticker: instrument ticker (e.g. "SBER", "GAZP").
-        interval: candle interval string stored in DB (e.g. "1h", "1d").
+    Аргументы:
+        ticker: тикер инструмента (например, "SBER", "GAZP").
+        interval: строка интервала свечи как в БД (например, "1h", "1d").
 
-    Returns:
-        DataFrame with columns [time, open, high, low, close, volume],
-        sorted by time ASC, with float64 price columns.
-        Returns empty DataFrame if ticker not found.
+    Возвращает:
+        DataFrame с колонками [time, open, high, low, close, volume],
+        отсортированный по времени ASC, цены в float64.
+        Возвращает пустой DataFrame если тикер не найден.
     """
     async with get_session() as session:
         stmt = (
@@ -52,7 +52,7 @@ async def load_ticker_data(
 
     df = pd.DataFrame(rows, columns=["time", "open", "high", "low", "close", "volume"])
 
-    # Convert Decimal to float64 for TA-Lib compatibility
+    # Преобразуем Decimal → float64 для совместимости с TA-Lib
     for col in ("open", "high", "low", "close"):
         df[col] = df[col].astype(float)
     df["volume"] = df["volume"].astype(float)
@@ -71,18 +71,18 @@ async def load_all_tickers_dataset(
     interval: str = "1h",
 ) -> pd.DataFrame:
     """
-    Load candle data for multiple tickers and combine into one DataFrame.
+    Загрузить свечи для нескольких тикеров и объединить в один DataFrame.
 
-    Each ticker's rows get a "ticker" column for grouping during feature
-    engineering (indicators must be computed per-ticker, not across all data).
+    Каждая строка получает колонку "ticker" для группировки при вычислении признаков
+    (индикаторы должны считаться отдельно по каждому тикеру, а не по всем данным сразу).
 
-    Args:
-        tickers: list of ticker strings.
-        interval: candle interval string (e.g. "1h").
+    Аргументы:
+        tickers: список тикеров.
+        interval: строка интервала свечи (например, "1h").
 
-    Returns:
-        Combined DataFrame with columns [ticker, time, open, high, low, close, volume].
-        Tickers with no data are skipped.
+    Возвращает:
+        Объединённый DataFrame с колонками [ticker, time, open, high, low, close, volume].
+        Тикеры без данных пропускаются.
     """
     frames: list[pd.DataFrame] = []
 

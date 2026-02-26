@@ -1,58 +1,58 @@
 """
-Feature engineering for ML models using TA-Lib technical indicators.
+Вычисление технических индикаторов для ML-моделей через TA-Lib.
 
-Takes a DataFrame with OHLCV columns and returns enriched DataFrame
-with 20+ technical indicator features ready for LightGBM training.
+Принимает DataFrame с колонками OHLCV и возвращает обогащённый DataFrame
+с 20+ признаками технического анализа, готовыми для обучения LightGBM.
 """
 import numpy as np
 import pandas as pd
 import talib
 
-# Feature column names (used for consistent train/predict alignment)
+# Имена колонок признаков (используются для согласованности между обучением и инференсом)
 FEATURE_COLUMNS: list[str] = [
-    # Trend
+    # Тренд
     "SMA_20", "SMA_50", "EMA_12", "EMA_26", "ADX_14",
-    # Momentum
+    # Импульс
     "RSI_14", "MACD", "MACD_signal", "MACD_hist", "ROC_10",
-    # Volatility
+    # Волатильность
     "BB_upper", "BB_mid", "BB_lower", "ATR_14", "BB_width",
-    # Volume
+    # Объём
     "OBV", "VOLUME_SMA_20",
-    # Price ratios (derived)
+    # Ценовые отношения (производные)
     "close_sma20_ratio", "close_sma50_ratio", "high_low_ratio",
 ]
 
 
 def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     """
-    Compute technical indicator features for a single ticker DataFrame.
+    Вычислить признаки технических индикаторов для одного тикера.
 
-    Args:
-        df: DataFrame with columns [time, open, high, low, close, volume].
-            Must be sorted by time ASC. Values must be float64.
+    Аргументы:
+        df: DataFrame с колонками [time, open, high, low, close, volume].
+            Должен быть отсортирован по времени ASC. Значения — float64.
 
-    Returns:
-        DataFrame with original columns + FEATURE_COLUMNS.
-        First ~50 rows are dropped (indicator warmup period).
-        Index is reset to 0-based integers.
+    Возвращает:
+        DataFrame с исходными колонками + FEATURE_COLUMNS.
+        Первые ~50 строк удаляются (период прогрева индикаторов).
+        Индекс сбрасывается к целым числам начиная с 0.
     """
     df = df.copy()
 
-    # TA-Lib requires numpy float64 arrays
+    # TA-Lib требует numpy-массивы типа float64
     close = df["close"].values.astype(np.float64)
     open_ = df["open"].values.astype(np.float64)
     high = df["high"].values.astype(np.float64)
     low = df["low"].values.astype(np.float64)
     volume = df["volume"].values.astype(np.float64)
 
-    # ── Trend indicators ────────────────────────────────────────────────────
+    # ── Индикаторы тренда ────────────────────────────────────────────────────
     df["SMA_20"] = talib.SMA(close, timeperiod=20)
     df["SMA_50"] = talib.SMA(close, timeperiod=50)
     df["EMA_12"] = talib.EMA(close, timeperiod=12)
     df["EMA_26"] = talib.EMA(close, timeperiod=26)
     df["ADX_14"] = talib.ADX(high, low, close, timeperiod=14)
 
-    # ── Momentum indicators ─────────────────────────────────────────────────
+    # ── Индикаторы импульса ──────────────────────────────────────────────────
     df["RSI_14"] = talib.RSI(close, timeperiod=14)
     macd, macd_signal, macd_hist = talib.MACD(
         close, fastperiod=12, slowperiod=26, signalperiod=9
@@ -62,7 +62,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df["MACD_hist"] = macd_hist
     df["ROC_10"] = talib.ROC(close, timeperiod=10)
 
-    # ── Volatility indicators ───────────────────────────────────────────────
+    # ── Индикаторы волатильности ─────────────────────────────────────────────
     bb_upper, bb_mid, bb_lower = talib.BBANDS(
         close, timeperiod=20, nbdevup=2, nbdevdn=2
     )
@@ -70,16 +70,16 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df["BB_mid"] = bb_mid
     df["BB_lower"] = bb_lower
     df["ATR_14"] = talib.ATR(high, low, close, timeperiod=14)
-    # BB width: normalised band width (avoids division by zero)
+    # Ширина полос Боллинджера: нормализованная ширина (защита от деления на ноль)
     df["BB_width"] = np.where(
         bb_mid != 0, (bb_upper - bb_lower) / bb_mid, np.nan
     )
 
-    # ── Volume indicators ───────────────────────────────────────────────────
+    # ── Индикаторы объёма ────────────────────────────────────────────────────
     df["OBV"] = talib.OBV(close, volume)
     df["VOLUME_SMA_20"] = talib.SMA(volume, timeperiod=20)
 
-    # ── Derived price ratios ────────────────────────────────────────────────
+    # ── Производные ценовые отношения ────────────────────────────────────────
     df["close_sma20_ratio"] = np.where(
         df["SMA_20"] != 0, close / df["SMA_20"], np.nan
     )
@@ -90,7 +90,7 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
         close != 0, (high - low) / close, np.nan
     )
 
-    # Drop rows where any feature is NaN (warmup period, ~50 rows per ticker)
+    # Удаляем строки где хотя бы один признак NaN (период прогрева, ~50 строк на тикер)
     df = df.dropna(subset=FEATURE_COLUMNS).reset_index(drop=True)
 
     return df

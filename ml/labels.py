@@ -1,19 +1,19 @@
 """
-Label generation for supervised ML training.
+Генерация меток для обучения ML с учителем.
 
-Converts OHLCV price series into BUY / HOLD / SELL classification targets
-based on future price returns over a configurable look-ahead window.
+Преобразует ценовой ряд OHLCV в метки классификации BUY / HOLD / SELL
+на основе будущей доходности за заданное окно прогноза.
 """
 import numpy as np
 import pandas as pd
 
-# Numeric label encoding used by LightGBM (must be 0-based integers)
+# Числовое кодирование меток для LightGBM (обязательно с нуля)
 LABEL_MAP: dict[str, int] = {
     "SELL": 0,
     "HOLD": 1,
     "BUY":  2,
 }
-LABEL_NAMES: list[str] = ["SELL", "HOLD", "BUY"]  # index → name
+LABEL_NAMES: list[str] = ["SELL", "HOLD", "BUY"]  # индекс → название
 
 
 def create_labels(
@@ -22,36 +22,36 @@ def create_labels(
     threshold: float = 0.01,
 ) -> pd.Series:
     """
-    Generate BUY/HOLD/SELL integer labels based on future price return.
+    Сгенерировать целочисленные метки BUY/HOLD/SELL по будущей доходности цены.
 
-    Label logic:
+    Логика меток:
         future_return = (close[t+lookahead] - close[t]) / close[t]
         > +threshold  →  BUY  (2)
         < -threshold  →  SELL (0)
-        otherwise     →  HOLD (1)
+        иначе         →  HOLD (1)
 
-    The last `lookahead` rows are dropped because future price is unknown.
+    Последние `lookahead` строк удаляются — будущая цена для них неизвестна.
 
-    Args:
-        df: DataFrame with a "close" column, sorted by time ASC.
-        lookahead: number of candles ahead to measure return (default 4 = 4h).
-        threshold: minimum absolute return to trigger BUY/SELL (default 1%).
+    Аргументы:
+        df: DataFrame с колонкой "close", отсортированный по времени ASC.
+        lookahead: количество свечей вперёд для измерения доходности (по умолчанию 4 = 4 часа).
+        threshold: минимальная абсолютная доходность для сигнала BUY/SELL (по умолчанию 1%).
 
-    Returns:
-        pd.Series of int labels (SELL=0, HOLD=1, BUY=2), same index as df
-        but with last `lookahead` rows removed.
+    Возвращает:
+        pd.Series с целыми метками (SELL=0, HOLD=1, BUY=2), тот же индекс что у df,
+        но без последних `lookahead` строк.
     """
     close = df["close"].values.astype(np.float64)
     n = len(close)
 
-    labels = np.ones(n, dtype=np.int8)  # default: HOLD
+    labels = np.ones(n, dtype=np.int8)  # по умолчанию: HOLD
 
-    # future_return is only defined for indices 0 .. n-lookahead-1
+    # future_return определён только для индексов 0 .. n-lookahead-1
     valid = n - lookahead
     future_close = close[lookahead:lookahead + valid]
     current_close = close[:valid]
 
-    # Avoid division by zero
+    # Защита от деления на ноль
     with np.errstate(invalid="ignore", divide="ignore"):
         future_return = np.where(
             current_close != 0,
@@ -62,6 +62,6 @@ def create_labels(
     labels[:valid][future_return > threshold] = LABEL_MAP["BUY"]
     labels[:valid][future_return < -threshold] = LABEL_MAP["SELL"]
 
-    # Drop last `lookahead` rows — no future data available there
+    # Удаляем последние `lookahead` строк — будущих данных нет
     result = pd.Series(labels[:valid], index=df.index[:valid], name="label")
     return result

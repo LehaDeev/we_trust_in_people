@@ -1,11 +1,11 @@
 """
-LightGBM model training for BUY/SELL/HOLD signal prediction.
+Обучение LightGBM модели для предсказания сигналов BUY/SELL/HOLD.
 
-Loads candle data from PostgreSQL, computes technical indicator features,
-generates labels, trains a multi-class LightGBM classifier, and saves
-model weights to ml/weights/.
+Загружает свечи из PostgreSQL, вычисляет признаки технического анализа,
+генерирует метки, обучает многоклассовый LightGBM классификатор
+и сохраняет веса модели в ml/weights/.
 
-Usage (via scripts/train_model.py):
+Запуск (через scripts/train_model.py):
     python -m scripts.train_model
 """
 import json
@@ -23,7 +23,7 @@ from ml.features import FEATURE_COLUMNS, compute_features
 from ml.labels import LABEL_NAMES, create_labels
 from utils.logger import logger
 
-# ── Config ──────────────────────────────────────────────────────────────────
+# ── Настройки ────────────────────────────────────────────────────────────────
 
 MODEL_VERSION = "v1"
 WEIGHTS_DIR = Path(__file__).parent / "weights"
@@ -33,7 +33,7 @@ TICKERS = [
     "GMKN", "MGNT", "TATN", "ROSN", "MTSS",
 ]
 
-# LightGBM hyperparameters
+# Гиперпараметры LightGBM
 LGB_PARAMS: dict = {
     "objective": "multiclass",
     "num_class": 3,
@@ -47,21 +47,21 @@ LGB_PARAMS: dict = {
     "verbose": -1,
 }
 
-LOOKAHEAD = 4       # hours ahead to compute return
-THRESHOLD = 0.01    # ±1% threshold for BUY/SELL
+LOOKAHEAD = 4       # свечей вперёд для расчёта доходности
+THRESHOLD = 0.01    # порог ±1% для сигналов BUY/SELL
 
 
-# ── Training logic ───────────────────────────────────────────────────────────
+# ── Логика обучения ──────────────────────────────────────────────────────────
 
 def _build_dataset(raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     """
-    Apply feature engineering and label generation per ticker.
+    Применить вычисление признаков и генерацию меток отдельно по каждому тикеру.
 
-    Args:
-        raw: combined DataFrame with [ticker, time, open, high, low, close, volume].
+    Аргументы:
+        raw: объединённый DataFrame с колонками [ticker, time, open, high, low, close, volume].
 
-    Returns:
-        (X, y): feature DataFrame and label Series, both with matching indices.
+    Возвращает:
+        (X, y): DataFrame признаков и Series меток с согласованными индексами.
     """
     feature_frames: list[pd.DataFrame] = []
     label_series: list[pd.Series] = []
@@ -69,17 +69,17 @@ def _build_dataset(raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
     for ticker, group in raw.groupby("ticker", sort=False):
         group = group.reset_index(drop=True)
 
-        # Features (also drops warmup NaN rows)
+        # Признаки (также удаляет строки прогрева с NaN)
         feat_df = compute_features(group)
 
-        # Labels (drops last LOOKAHEAD rows)
+        # Метки (удаляет последние LOOKAHEAD строк)
         labels = create_labels(feat_df, lookahead=LOOKAHEAD, threshold=THRESHOLD)
 
-        # Align: features and labels must cover the same rows
+        # Выравнивание: признаки и метки должны покрывать одни и те же строки
         feat_df = feat_df.loc[labels.index]
 
         feat_df = feat_df.copy()
-        feat_df["_ticker"] = ticker  # keep for debugging, not used as feature
+        feat_df["_ticker"] = ticker  # для отладки, не используется как признак
 
         feature_frames.append(feat_df)
         label_series.append(labels)
@@ -107,10 +107,10 @@ def _build_dataset(raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
 
 async def train_model() -> Path:
     """
-    Full training pipeline: load data → features → labels → train → save.
+    Полный pipeline обучения: загрузка данных → признаки → метки → обучение → сохранение.
 
-    Returns:
-        Path to saved model pkl file.
+    Возвращает:
+        Path к сохранённому файлу модели pkl.
     """
     WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -130,7 +130,7 @@ async def train_model() -> Path:
         class_distribution=y.value_counts().to_dict(),
     )
 
-    # Train/validation split (chronological — do NOT shuffle for time series)
+    # Разбивка train/validation (хронологическая — НЕ перемешиваем для временных рядов)
     X_train, X_val, y_train, y_val = train_test_split(
         X, y, test_size=0.2, shuffle=False
     )
@@ -151,7 +151,7 @@ async def train_model() -> Path:
         ],
     )
 
-    # Evaluate on validation set
+    # Оценка на валидационной выборке
     y_pred = model.predict(X_val)
     report = classification_report(y_val, y_pred, target_names=LABEL_NAMES)
     logger.info("Validation classification report:\n" + report)
@@ -159,12 +159,12 @@ async def train_model() -> Path:
     val_accuracy = float(np.mean(y_pred == y_val.values))
     logger.info("Validation accuracy", accuracy=round(val_accuracy, 4))
 
-    # Save model
+    # Сохраняем модель
     model_path = WEIGHTS_DIR / f"lgbm_{MODEL_VERSION}.pkl"
     with open(model_path, "wb") as f:
         pickle.dump(model, f)
 
-    # Save feature list (required for consistent inference)
+    # Сохраняем список признаков (необходим для согласованного инференса)
     features_path = WEIGHTS_DIR / f"features_{MODEL_VERSION}.json"
     with open(features_path, "w") as f:
         json.dump(FEATURE_COLUMNS, f, indent=2)

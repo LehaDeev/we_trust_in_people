@@ -1,10 +1,10 @@
 """
-Inference: generate BUY/SELL/HOLD signal for a single ticker.
+Инференс: генерация сигнала BUY/SELL/HOLD для одного тикера.
 
-Loads the trained LightGBM model from disk, fetches the latest candles
-from the database, computes features, and returns a signal dict.
+Загружает обученную LightGBM модель с диска, получает последние свечи
+из базы данных, вычисляет признаки и возвращает словарь с сигналом.
 
-Usage:
+Использование:
     import asyncio
     from ml.predict import predict_signal
 
@@ -23,11 +23,11 @@ from ml.features import compute_features
 from ml.labels import LABEL_NAMES
 from utils.logger import logger
 
-# Default paths (can be overridden via arguments)
+# Пути по умолчанию (можно переопределить через аргументы)
 DEFAULT_WEIGHTS_DIR = Path(__file__).parent / "weights"
 DEFAULT_MODEL_VERSION = "v1"
 
-# Minimum candles needed: 50 warmup + 200 buffer for robust indicator values
+# Минимум свечей: 50 прогрев + 200 буфер для надёжных значений индикаторов
 MIN_CANDLES = 250
 
 
@@ -38,24 +38,24 @@ async def predict_signal(
     interval: str = "1h",
 ) -> dict:
     """
-    Generate a BUY/SELL/HOLD signal for the given ticker.
+    Сгенерировать сигнал BUY/SELL/HOLD для заданного тикера.
 
-    Args:
-        ticker: instrument ticker (e.g. "SBER").
-        model_version: model version suffix (default "v1").
-        weights_dir: directory containing pkl and json weight files.
-        interval: candle interval to load from DB (default "1h").
+    Аргументы:
+        ticker: тикер инструмента (например, "SBER").
+        model_version: суффикс версии модели (по умолчанию "v1").
+        weights_dir: директория с файлами весов pkl и json.
+        interval: интервал свечей для загрузки из БД (по умолчанию "1h").
 
-    Returns:
-        dict with keys:
-            ticker (str): the ticker
-            signal (str): "BUY", "HOLD", or "SELL"
-            confidence (float): model probability for the predicted class
+    Возвращает:
+        Словарь с ключами:
+            ticker (str): тикер
+            signal (str): "BUY", "HOLD" или "SELL"
+            confidence (float): вероятность модели для предсказанного класса
             probabilities (dict): {"SELL": p, "HOLD": p, "BUY": p}
 
-    Raises:
-        FileNotFoundError: if model weights are not found.
-        ValueError: if not enough candle data is available.
+    Исключения:
+        FileNotFoundError: если веса модели не найдены.
+        ValueError: если недостаточно данных свечей.
     """
     model_path = weights_dir / f"lgbm_{model_version}.pkl"
     features_path = weights_dir / f"features_{model_version}.json"
@@ -66,13 +66,13 @@ async def predict_signal(
             "Run: python -m scripts.train_model"
         )
 
-    # Load model and expected feature list
+    # Загружаем модель и ожидаемый список признаков
     with open(model_path, "rb") as f:
         model = pickle.load(f)
     with open(features_path) as f:
         feature_columns: list[str] = json.load(f)
 
-    # Load candle data
+    # Загружаем данные свечей
     df = await load_ticker_data(ticker, interval)
 
     if len(df) < MIN_CANDLES:
@@ -80,20 +80,20 @@ async def predict_signal(
             f"Not enough candles for {ticker}: {len(df)} < {MIN_CANDLES} required."
         )
 
-    # Use only the most recent candles to keep inference fast
+    # Берём только последние свечи для ускорения инференса
     df = df.tail(MIN_CANDLES).reset_index(drop=True)
 
-    # Compute features (drops warmup rows internally)
+    # Вычисляем признаки (строки прогрева удаляются внутри)
     feat_df = compute_features(df)
 
     if feat_df.empty:
         raise ValueError(f"No valid feature rows for {ticker} after indicator warmup.")
 
-    # Take the most recent row
+    # Берём последнюю строку (самую свежую)
     last_row = feat_df[feature_columns].iloc[[-1]]
 
-    # Predict
-    proba = model.predict_proba(last_row)[0]  # shape: (3,) — SELL, HOLD, BUY
+    # Предсказание
+    proba = model.predict_proba(last_row)[0]  # форма: (3,) — SELL, HOLD, BUY
     predicted_class = int(np.argmax(proba))
     confidence = float(proba[predicted_class])
     signal = LABEL_NAMES[predicted_class]
@@ -125,10 +125,10 @@ async def predict_all(
     interval: str = "1h",
 ) -> list[dict]:
     """
-    Generate signals for a list of tickers. Skips on error.
+    Сгенерировать сигналы для списка тикеров. При ошибке — пропускает тикер.
 
-    Returns:
-        List of signal dicts (only for successfully processed tickers).
+    Возвращает:
+        Список словарей с сигналами (только для успешно обработанных тикеров).
     """
     results: list[dict] = []
     for ticker in tickers:
