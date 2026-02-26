@@ -5,7 +5,7 @@ Add new models here as the project grows.
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, func
+from sqlalchemy import DateTime, ForeignKey, Numeric, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db.database import Base
@@ -31,6 +31,9 @@ class Asset(Base):
 class Candle(Base):
     """OHLCV candle data for an asset."""
     __tablename__ = "candles"
+    __table_args__ = (
+        UniqueConstraint("asset_id", "time", "interval", name="uq_candle_asset_time_interval"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), index=True)
