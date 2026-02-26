@@ -13,10 +13,10 @@ aiogram==3.25.0
 
 # PostgreSQL async
 asyncpg==0.30.0
-SQLAlchemy[asyncio]==2.0.30
+SQLAlchemy[asyncio]==2.0.47
 
 # DB migrations
-alembic==1.13.1
+alembic==1.18.4
 
 # Config / Settings
 pydantic==2.10.6

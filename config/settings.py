@@ -2,6 +2,8 @@
 Project settings loaded from .env file.
 Uses pydantic-settings for validation and type safety.
 """
+from urllib.parse import quote_plus
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -31,17 +33,19 @@ class PostgresSettings(BaseSettings):
 
     @property
     def dsn(self) -> str:
-        """Async DSN for asyncpg."""
+        """Async DSN for SQLAlchemy + asyncpg (special chars URL-encoded)."""
+        pwd = quote_plus(self.password)
         return (
-            f"postgresql+asyncpg://{self.user}:{self.password}"
+            f"postgresql+asyncpg://{self.user}:{pwd}"
             f"@{self.host}:{self.port}/{self.db}"
         )
 
     @property
     def asyncpg_dsn(self) -> str:
-        """Raw asyncpg DSN (without SQLAlchemy prefix)."""
+        """Raw asyncpg DSN (without SQLAlchemy prefix, special chars URL-encoded)."""
+        pwd = quote_plus(self.password)
         return (
-            f"postgresql://{self.user}:{self.password}"
+            f"postgresql://{self.user}:{pwd}"
             f"@{self.host}:{self.port}/{self.db}"
         )
 
