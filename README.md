@@ -3,17 +3,20 @@
 Автоматизированный торговый помощник для Tinkoff Инвестиции с ML-сигналами покупки/продажи.
 
 ## Возможности
-- Интеграция с Tinkoff Invest API (асинхронная)
+- Интеграция с Tinkoff Invest API (асинхронная, боевой режим)
 - PostgreSQL для хранения рыночных данных и сигналов
+- Автоматический сбор исторических свечей по списку тикеров
 - ML-модели для предсказания сигналов покупки/продажи
 - Telegram-бот с инлайн-интерфейсом
 
 ## Технологический стек
-- Python 3.11+
-- aiohttp, aiogram 3.x
+- Python 3.13+
+- aiogram 3.x (только inline-кнопки)
 - SQLAlchemy 2.x async + asyncpg
-- PostgreSQL
-- LightGBM / CatBoost
+- PostgreSQL 18
+- Alembic (миграции)
+- LightGBM
+- structlog
 
 ## Установка
 
@@ -27,7 +30,7 @@ python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
 # 3. Установить зависимости
-pip install -r requirements.txt
+pip install -r requirements.txt --extra-index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple
 
 # 4. Настроить переменные окружения
 cp .env.example .env
@@ -35,19 +38,39 @@ cp .env.example .env
 
 # 5. Применить миграции БД
 alembic upgrade head
+
+# 6. Собрать исторические данные
+python -m scripts.collect_candles
 ```
 
 ## Структура проекта
 
 ```
 we_trust_in_people/
-├── config/         # Настройки (Pydantic)
-├── db/             # Модели БД и подключение
-├── tinkoff/        # Клиент Tinkoff API
-├── ml/             # ML-модели (веса не включены в публичный репозиторий)
-├── bot/            # Telegram-бот
-└── utils/          # Логгер и общие утилиты
+├── config/         # Настройки (Pydantic Settings)
+├── db/             # Модели БД, подключение, репозитории
+│   ├── models.py       # ORM: Asset, Candle, Signal
+│   ├── database.py     # Async engine, session
+│   └── candle_repo.py  # Операции с активами и свечами
+├── tinkoff/        # Клиент Tinkoff Invest API
+│   ├── client.py       # Async gRPC клиент
+│   ├── market_data.py  # Свечи, цены, стакан
+│   ├── instruments.py  # Поиск инструментов по тикеру
+│   └── portfolio.py    # Портфель и ордера
+├── ml/             # ML-модели (веса не включены в репозиторий)
+├── bot/            # Telegram-бот (в разработке)
+├── scripts/        # Утилиты запуска
+│   └── collect_candles.py  # Сбор исторических свечей
+├── alembic/        # Миграции БД
+└── utils/          # Логгер
 ```
+
+## Сбор данных
+
+Скрипт `scripts/collect_candles.py` загружает 365 дней часовых свечей для 10 голубых фишек MOEX:
+`SBER, GAZP, LKOH, YDEX, NVTK, GMKN, MGNT, TATN, ROSN, MTSS`
+
+При повторном запуске догружает только новые свечи (инкрементально).
 
 ## Важно: веса моделей
 Веса ML-моделей **не включены** в этот репозиторий.
