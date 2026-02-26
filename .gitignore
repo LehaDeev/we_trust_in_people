@@ -1,0 +1,54 @@
+# Environment & secrets
+.env
+.env.local
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# ML model weights — PRIVATE, never commit
+ml/weights/
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+*.ckpt
+*.onnx
+
+# IDE
+.vscode/
+.idea/
+
+# Claude Code — не включать в репозиторий
+.claude/
+CLAUDE.md
+
+# Внутренние инструменты разработки — не публиковать
+agents/
+
+# Logs
+logs/
+*.log
+
+# DB
+*.sqlite3
+*.db
+
+# OS
+.DS_Store
+Thumbs.db
