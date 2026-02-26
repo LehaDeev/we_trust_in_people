@@ -1,6 +1,10 @@
 """
 Операции с портфелем и ордерами через Tinkoff Invest API.
 Баланс, позиции, выставление и отмена заявок.
+
+Лимиты API (актуально с февраля 2025):
+    - PostOrder:      15 заявок/сек — ограничен через rate_limiter.post_order_limiter
+    - PostOrderAsync: без ограничений данным лимитом
 """
 from decimal import Decimal
 
@@ -16,6 +20,7 @@ from t_tech.invest.utils import money_to_decimal, quotation_to_decimal
 
 from config.settings import tinkoff_settings
 from tinkoff.client import get_client
+from tinkoff.rate_limiter import post_order_limiter
 from utils.logger import logger
 
 ACCOUNT_ID = tinkoff_settings.account_id
@@ -25,7 +30,7 @@ async def get_portfolio() -> PortfolioResponse:
     """
     Получить текущий портфель (позиции + стоимость).
 
-    Returns:
+    Возвращает:
         PortfolioResponse с полями positions, total_amount_shares,
         total_amount_bonds, total_amount_etf, total_amount_currencies
     """
@@ -44,7 +49,7 @@ async def get_positions() -> PositionsResponse:
     """
     Получить текущие позиции по счёту (упрощённый вид).
 
-    Returns:
+    Возвращает:
         PositionsResponse с securities, futures, options, currencies, money
     """
     async with get_client() as client:
@@ -58,7 +63,7 @@ async def get_portfolio_summary() -> dict:
     """
     Краткая сводка по портфелю в удобном формате.
 
-    Returns:
+    Возвращает:
         Словарь с суммами по типам активов и списком позиций
     """
     portfolio = await get_portfolio()
@@ -93,17 +98,22 @@ async def post_market_order(
     """
     Выставить рыночную заявку.
 
-    Args:
-        instrument_id: FIGI или UID инструмента
-        quantity: количество лотов
-        direction: ORDER_DIRECTION_BUY или ORDER_DIRECTION_SELL
-        order_id: уникальный ID заявки (генерируется автоматически если None)
+    Соблюдает лимит PostOrder: 15 заявок/сек — при превышении автоматически ждёт.
 
-    Returns:
+    Аргументы:
+        instrument_id: FIGI или UID инструмента
+        quantity:      количество лотов
+        direction:     ORDER_DIRECTION_BUY или ORDER_DIRECTION_SELL
+        order_id:      уникальный ID заявки (генерируется автоматически если None)
+
+    Возвращает:
         PostOrderResponse с order_id, status, executed_order_price
     """
     import uuid
     order_id = order_id or str(uuid.uuid4())
+
+    # Ожидаем разрешения от ограничителя (15 заявок/сек)
+    await post_order_limiter.acquire()
 
     async with get_client() as client:
         response = await client.orders.post_order(
@@ -136,20 +146,25 @@ async def post_limit_order(
     """
     Выставить лимитную заявку.
 
-    Args:
-        instrument_id: FIGI или UID инструмента
-        quantity: количество лотов
-        price: цена за единицу
-        direction: ORDER_DIRECTION_BUY или ORDER_DIRECTION_SELL
-        order_id: уникальный ID заявки
+    Соблюдает лимит PostOrder: 15 заявок/сек — при превышении автоматически ждёт.
 
-    Returns:
+    Аргументы:
+        instrument_id: FIGI или UID инструмента
+        quantity:      количество лотов
+        price:         цена за единицу
+        direction:     ORDER_DIRECTION_BUY или ORDER_DIRECTION_SELL
+        order_id:      уникальный ID заявки
+
+    Возвращает:
         PostOrderResponse
     """
     import uuid
     from t_tech.invest.utils import decimal_to_quotation
 
     order_id = order_id or str(uuid.uuid4())
+
+    # Ожидаем разрешения от ограничителя (15 заявок/сек)
+    await post_order_limiter.acquire()
 
     async with get_client() as client:
         response = await client.orders.post_order(
@@ -178,7 +193,7 @@ async def cancel_order(order_id: str) -> None:
     """
     Отменить выставленную заявку.
 
-    Args:
+    Аргументы:
         order_id: ID заявки для отмены
     """
     async with get_client() as client:
@@ -193,7 +208,7 @@ async def get_open_orders() -> list[dict]:
     """
     Получить все активные (незакрытые) заявки по счёту.
 
-    Returns:
+    Возвращает:
         Список словарей с информацией о заявках
     """
     async with get_client() as client:
