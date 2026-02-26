@@ -15,7 +15,7 @@
 - SQLAlchemy 2.x async + asyncpg
 - PostgreSQL 18
 - Alembic (миграции)
-- LightGBM
+- LightGBM + TA-Lib (технический анализ, 150+ индикаторов)
 - structlog
 
 ## Установка
@@ -57,10 +57,17 @@ we_trust_in_people/
 │   ├── market_data.py  # Свечи, цены, стакан
 │   ├── instruments.py  # Поиск инструментов по тикеру
 │   └── portfolio.py    # Портфель и ордера
-├── ml/             # ML-модели (веса не включены в репозиторий)
+├── ml/             # ML-pipeline
+│   ├── features.py     # Технические индикаторы (TA-Lib): RSI, MACD, BB, ATR...
+│   ├── labels.py       # Генерация меток BUY/SELL/HOLD
+│   ├── dataset.py      # Загрузка данных из БД для обучения
+│   ├── train.py        # Обучение LightGBM модели
+│   ├── predict.py      # Инференс: сигнал для тикера
+│   └── weights/        # Веса моделей (не включены в репозиторий)
 ├── bot/            # Telegram-бот (в разработке)
 ├── scripts/        # Утилиты запуска
-│   └── collect_candles.py  # Сбор исторических свечей
+│   ├── collect_candles.py  # Сбор исторических свечей
+│   └── train_model.py      # Запуск обучения ML модели
 ├── alembic/        # Миграции БД
 └── utils/          # Логгер
 ```
@@ -72,6 +79,24 @@ we_trust_in_people/
 
 При повторном запуске догружает только новые свечи (инкрементально).
 
+## ML Pipeline
+
+Технические индикаторы вычисляются с помощью **TA-Lib** (RSI, MACD, Bollinger Bands, ATR, ADX, EMA, SMA, OBV и др.).
+
+### Метки (labels)
+- Смотрим на `+4` свечи вперёд (4 часа)
+- Рост цены `> 1%` → **BUY**
+- Падение цены `> 1%` → **SELL**
+- Иначе → **HOLD**
+
+### Обучение модели
+
+```bash
+python -m scripts.train_model
+```
+
+Веса сохраняются в `ml/weights/lgbm_v1.pkl`.
+
 ## Важно: веса моделей
 Веса ML-моделей **не включены** в этот репозиторий.
-Они хранятся отдельно и подключаются через путь, указанный в `.env`.
+Они хранятся в `ml/weights/` (директория в `.gitignore`).
