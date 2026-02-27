@@ -5,14 +5,20 @@
     python -m scripts.collect_candles
 
 Что делает:
-    1. Ищет инструменты по списку тикеров
+    1. Ищет инструменты по списку тикеров из .env (DATA_TICKERS)
     2. Сохраняет активы в таблицу assets
     3. Загружает исторические свечи (с последней сохранённой даты)
     4. Сохраняет свечи в таблицу candles (дубликаты игнорируются)
+
+Все настройки — в .env:
+    DATA_TICKERS         — список тикеров через запятую
+    DATA_CANDLE_INTERVAL — интервал свечей (1h, 1d и т.д.)
+    DATA_HISTORY_DAYS    — глубина истории при первом запуске
 """
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+from config.settings import data_settings
 from db.candle_repo import (
     INTERVAL_TO_STR,
     get_last_candle_time,
@@ -25,31 +31,31 @@ from tinkoff.instruments import get_instruments_by_tickers
 from tinkoff.market_data import fetch_candles_list
 from utils.logger import logger
 
-# ── Настройки сбора данных ──────────────────────────────────────────────────
-
-# Список тикеров для сбора данных (голубые фишки MOEX)
-TARGET_TICKERS = [
-    "SBER",   # Сбербанк
-    "GAZP",   # Газпром
-    "LKOH",   # ЛУКОЙЛ
-    "YDEX",   # Яндекс (MOEX)
-    "NVTK",   # НОВАТЭК
-    "GMKN",   # Норникель
-    "MGNT",   # Магнит
-    "TATN",   # Татнефть
-    "ROSN",   # Роснефть
-    "MTSS",   # МТС
-]
-
-# Интервал свечей
-CANDLE_INTERVAL = CandleInterval.CANDLE_INTERVAL_HOUR
-INTERVAL_STR = INTERVAL_TO_STR[CANDLE_INTERVAL.name]  # "1h"
-
-# Глубина истории при первом запуске (в днях)
-HISTORY_DAYS = 365
+# Обратный маппинг: строка интервала ("1h") → имя enum ("CANDLE_INTERVAL_HOUR")
+_STR_TO_INTERVAL_NAME: dict[str, str] = {v: k for k, v in INTERVAL_TO_STR.items()}
 
 
-# ── Основная логика ─────────────────────────────────────────────────────────
+def _get_candle_interval(interval_str: str) -> CandleInterval:
+    """
+    Преобразовать строку интервала из настроек в CandleInterval enum.
+
+    Аргументы:
+        interval_str: строка из DATA_CANDLE_INTERVAL ("1h", "1d" и т.д.)
+
+    Возвращает:
+        Соответствующий элемент CandleInterval.
+
+    Исключения:
+        ValueError: если строка не найдена в маппинге.
+    """
+    enum_name = _STR_TO_INTERVAL_NAME.get(interval_str)
+    if enum_name is None:
+        valid = list(_STR_TO_INTERVAL_NAME.keys())
+        raise ValueError(
+            f"Неизвестный интервал '{interval_str}'. Допустимые: {valid}"
+        )
+    return CandleInterval[enum_name]
+
 
 async def collect_for_ticker(
     ticker: str,
@@ -57,12 +63,15 @@ async def collect_for_ticker(
     uid: str,
     name: str,
     currency: str,
+    candle_interval: CandleInterval,
+    interval_str: str,
+    history_days: int,
 ) -> None:
     """
     Собрать и сохранить свечи для одного инструмента.
 
     Если свечи уже есть в БД — загружает только новые (инкрементально).
-    Если свечей нет — загружает полную историю за HISTORY_DAYS дней.
+    Если свечей нет — загружает полную историю за history_days дней.
     """
     async with get_session() as session:
         asset = await get_or_create_asset(
@@ -76,7 +85,7 @@ async def collect_for_ticker(
         last_time = await get_last_candle_time(
             session=session,
             asset_id=asset.id,
-            interval=INTERVAL_STR,
+            interval=interval_str,
         )
 
     # Определяем период загрузки
@@ -91,11 +100,11 @@ async def collect_for_ticker(
         )
     else:
         # Первый запуск: полная история
-        from_dt = now - timedelta(days=HISTORY_DAYS)
+        from_dt = now - timedelta(days=history_days)
         logger.info(
             "Full history load",
             ticker=ticker,
-            days=HISTORY_DAYS,
+            days=history_days,
             from_dt=from_dt.isoformat(),
         )
 
@@ -109,7 +118,7 @@ async def collect_for_ticker(
         instrument_id=instrument_id,
         from_=from_dt,
         to=now,
-        interval=CANDLE_INTERVAL,
+        interval=candle_interval,
         only_complete=True,
     )
 
@@ -129,7 +138,7 @@ async def collect_for_ticker(
             session=session,
             asset_id=asset.id,
             candles=candles,
-            interval=INTERVAL_STR,
+            interval=interval_str,
         )
 
     logger.info(
@@ -141,15 +150,25 @@ async def collect_for_ticker(
 
 
 async def main() -> None:
-    """Запустить сбор данных по всем тикерам из TARGET_TICKERS."""
-    logger.info("Starting candle collection", tickers=TARGET_TICKERS)
+    """Запустить сбор данных по всем тикерам из настроек."""
+    tickers = data_settings.tickers
+    candle_interval = _get_candle_interval(data_settings.candle_interval)
+    interval_str = data_settings.candle_interval
+    history_days = data_settings.history_days
+
+    logger.info(
+        "Starting candle collection",
+        tickers=tickers,
+        interval=interval_str,
+        history_days=history_days,
+    )
 
     await init_db()
 
     try:
         # Найти инструменты в Tinkoff API
         logger.info("Resolving instruments...")
-        instruments = await get_instruments_by_tickers(TARGET_TICKERS)
+        instruments = await get_instruments_by_tickers(tickers)
 
         if not instruments:
             logger.error("No instruments found, aborting")
@@ -158,7 +177,7 @@ async def main() -> None:
         logger.info(
             "Instruments resolved",
             found=len(instruments),
-            missing=[t for t in TARGET_TICKERS if t not in instruments],
+            missing=[t for t in tickers if t not in instruments],
         )
 
         # Собираем данные последовательно (не параллельно — ограничения API)
@@ -170,6 +189,9 @@ async def main() -> None:
                     uid=info.uid,
                     name=info.name,
                     currency=info.currency,
+                    candle_interval=candle_interval,
+                    interval_str=interval_str,
+                    history_days=history_days,
                 )
             except Exception as e:
                 logger.error(
