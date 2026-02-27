@@ -70,10 +70,24 @@ we_trust_in_people/
 └── utils/          # Логгер
 ```
 
+## Настройки
+
+Все параметры проекта хранятся в `.env` (скопировать из `.env.example`):
+
+| Переменная | Описание | Пример |
+|---|---|---|
+| `DATA_TICKERS` | Тикеры через запятую | `SBER,GAZP,LKOH` |
+| `DATA_CANDLE_INTERVAL` | Интервал свечей | `1h`, `1d`, `15min` |
+| `DATA_HISTORY_DAYS` | Глубина истории при первом запуске | `365` |
+| `ML_MODEL_VERSION` | Суффикс файлов весов | `v2` |
+| `ML_LOOKAHEAD` | Свечей вперёд для генерации меток | `4` |
+| `ML_THRESHOLD` | Порог доходности ±% для BUY/SELL | `0.01` |
+| `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `50` |
+
 ## Сбор данных
 
-Скрипт `scripts/collect_candles.py` загружает 365 дней часовых свечей для 10 голубых фишек MOEX:
-`SBER, GAZP, LKOH, YDEX, NVTK, GMKN, MGNT, TATN, ROSN, MTSS`
+Скрипт `scripts/collect_candles.py` загружает исторические свечи по тикерам из `DATA_TICKERS`.
+Глубина истории и интервал задаются в `.env` (`DATA_HISTORY_DAYS`, `DATA_CANDLE_INTERVAL`).
 
 При повторном запуске догружает только новые свечи (инкрементально).
 
