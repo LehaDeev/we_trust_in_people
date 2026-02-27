@@ -121,6 +121,11 @@ class MLSettings(BaseSettings):
     # Минимум свечей для инференса (50 прогрев + 200 буфер)
     min_candles_predict: int = Field(250, alias="ML_MIN_CANDLES_PREDICT")
 
+    # Принудительный повтор Optuna при следующем запуске обучения.
+    # true — игнорировать кеш best_params_*.json и запустить HPO заново.
+    # После использования вернуть в false, иначе HPO будет запускаться каждый раз.
+    force_tune: bool = Field(False, alias="ML_FORCE_TUNE")
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
