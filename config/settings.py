@@ -7,7 +7,7 @@
 """
 from urllib.parse import quote_plus
 
-from pydantic import Field, field_validator
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -70,8 +70,10 @@ class DataSettings(BaseSettings):
     """
 
     # Тикеры через запятую: SBER,GAZP,LKOH,...
-    tickers: list[str] = Field(
-        default=["SBER", "GAZP", "LKOH", "YDEX", "NVTK", "GMKN", "MGNT", "TATN", "ROSN", "MTSS"],
+    # str, а не list[str] — pydantic-settings 2.x пытается JSON-декодировать list-поля,
+    # что ломается на строках вида "SBER,GAZP". Список отдаётся через property ниже.
+    tickers_raw: str = Field(
+        default="SBER,GAZP,LKOH,YDEX,NVTK,GMKN,MGNT,TATN,ROSN,MTSS",
         alias="DATA_TICKERS",
     )
     # Интервал свечей: 1min, 5min, 15min, 1h, 1d, 1w
@@ -81,13 +83,10 @@ class DataSettings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
-    @field_validator("tickers", mode="before")
-    @classmethod
-    def parse_tickers(cls, v: str | list) -> list[str]:
-        """Парсит тикеры из строки вида 'SBER,GAZP,LKOH' или оставляет список."""
-        if isinstance(v, str):
-            return [t.strip() for t in v.split(",") if t.strip()]
-        return v
+    @property
+    def tickers(self) -> list[str]:
+        """Список тикеров, распарсенный из строки с запятыми."""
+        return [t.strip() for t in self.tickers_raw.split(",") if t.strip()]
 
 
 class MLSettings(BaseSettings):
