@@ -6,7 +6,8 @@
 - Интеграция с Tinkoff Invest API (асинхронная, боевой режим)
 - PostgreSQL для хранения рыночных данных и сигналов
 - Автоматический сбор исторических свечей по списку тикеров
-- ML-модели для предсказания сигналов покупки/продажи
+- Ансамбль ML-моделей для предсказания сигналов BUY / SELL / HOLD
+- Соблюдение rate limits Tinkoff API (PostOrder: 15 заявок/сек)
 - Telegram-бот с инлайн-интерфейсом
 
 ## Технологический стек
@@ -15,7 +16,9 @@
 - SQLAlchemy 2.x async + asyncpg
 - PostgreSQL 18
 - Alembic (миграции)
-- LightGBM, TA-Lib
+- LightGBM, XGBoost, scikit-learn — ансамбль моделей
+- Optuna — подбор гиперпараметров
+- TA-Lib — технические индикаторы
 - structlog
 
 ## Установка
@@ -56,6 +59,7 @@ we_trust_in_people/
 │   ├── client.py       # Async gRPC клиент
 │   ├── market_data.py  # Свечи, цены, стакан
 │   ├── instruments.py  # Поиск инструментов по тикеру
+│   ├── rate_limiter.py # Rate limiter (PostOrder: 15 заявок/сек)
 │   └── portfolio.py    # Портфель и ордера
 ├── ml/             # ML-модели (код обучения приватный)
 │   └── weights/        # Веса моделей (не включены в репозиторий)
@@ -75,8 +79,9 @@ we_trust_in_people/
 
 ## ML
 
-Для предсказания сигналов BUY / SELL / HOLD используются:
-- **LightGBM** — градиентный бустинг для классификации
+Для предсказания сигналов BUY / SELL / HOLD используется ансамбль:
+- **LightGBM** + **XGBoost** + **RandomForest** — soft voting по вероятностям
+- **Optuna** — автоматический подбор гиперпараметров (TPE, TimeSeriesSplit CV)
 - **TA-Lib** — технические индикаторы на основе OHLCV данных
 
 Код обучения и веса моделей не публикуются.
