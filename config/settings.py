@@ -17,6 +17,8 @@ class TinkoffSettings(BaseSettings):
     token: str = Field(..., alias="TINKOFF_TOKEN")
     account_id: str = Field(..., alias="TINKOFF_ACCOUNT_ID")
     sandbox: bool = Field(True, alias="TINKOFF_SANDBOX")
+    # Лимит PostOrder (заявок в секунду). Актуально: 15/сек с февраля 2025.
+    post_order_rate: int = Field(15, alias="TINKOFF_POST_ORDER_RATE")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

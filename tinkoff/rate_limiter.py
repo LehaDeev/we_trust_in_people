@@ -72,5 +72,10 @@ class TokenBucketRateLimiter:
 
 # ── Синглтоны для каждого метода API ────────────────────────────────────────
 
-# PostOrder: 15 заявок в секунду (лимит с февраля 2025)
-post_order_limiter = TokenBucketRateLimiter(rate=15, period=1.0)
+from config.settings import tinkoff_settings
+
+# PostOrder: лимит берётся из TINKOFF_POST_ORDER_RATE в .env
+post_order_limiter = TokenBucketRateLimiter(
+    rate=tinkoff_settings.post_order_rate,
+    period=1.0,
+)
