@@ -20,8 +20,14 @@ env/
 .venv/
 .env/
 
-# ML model weights — PRIVATE, never commit
+# ML — всё приватное, не публиковать
 ml/weights/
+ml/features.py
+ml/labels.py
+ml/dataset.py
+ml/train.py
+ml/predict.py
+scripts/train_model.py
 *.pkl
 *.joblib
 *.h5
