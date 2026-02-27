@@ -7,7 +7,7 @@
 - PostgreSQL для хранения рыночных данных и сигналов
 - Автоматический сбор исторических свечей по списку тикеров
 - Ансамбль ML-моделей для предсказания сигналов BUY / SELL / HOLD
-- Соблюдение rate limits Tinkoff API (PostOrder: 15 заявок/сек)
+- Соблюдение rate limits Tinkoff API (лимит настраивается через `TINKOFF_POST_ORDER_RATE`)
 - Telegram-бот с инлайн-интерфейсом
 
 ## Технологический стек
@@ -59,7 +59,7 @@ we_trust_in_people/
 │   ├── client.py       # Async gRPC клиент
 │   ├── market_data.py  # Свечи, цены, стакан
 │   ├── instruments.py  # Поиск инструментов по тикеру
-│   ├── rate_limiter.py # Rate limiter (PostOrder: 15 заявок/сек)
+│   ├── rate_limiter.py # Rate limiter (лимит из TINKOFF_POST_ORDER_RATE)
 │   └── portfolio.py    # Портфель и ордера
 ├── ml/             # ML-модели (код обучения приватный)
 │   └── weights/        # Веса моделей (не включены в репозиторий)
@@ -76,6 +76,7 @@ we_trust_in_people/
 
 | Переменная | Описание | Пример |
 |---|---|---|
+| `TINKOFF_POST_ORDER_RATE` | Лимит PostOrder (заявок/сек) | `15` |
 | `DATA_TICKERS` | Тикеры через запятую | `SBER,GAZP,LKOH` |
 | `DATA_CANDLE_INTERVAL` | Интервал свечей | `1h`, `1d`, `15min` |
 | `DATA_HISTORY_DAYS` | Глубина истории при первом запуске | `365` |
@@ -83,6 +84,7 @@ we_trust_in_people/
 | `ML_LOOKAHEAD` | Свечей вперёд для генерации меток | `4` |
 | `ML_THRESHOLD` | Порог доходности ±% для BUY/SELL | `0.01` |
 | `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `50` |
+| `ML_FORCE_TUNE` | Повторный запуск Optuna (игнорировать кеш) | `false` |
 
 ## Сбор данных
 
