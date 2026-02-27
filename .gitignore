@@ -27,6 +27,7 @@ ml/labels.py
 ml/dataset.py
 ml/train.py
 ml/predict.py
+ml/tune.py
 scripts/train_model.py
 *.pkl
 *.joblib
