@@ -4,11 +4,14 @@
 Алгоритм одного тика (_tick):
     1. Загружаем все открытые позиции из БД
     2. Получаем текущие цены инструментов
-    3. Проверяем стоп-лосс и тейк-профит для каждой открытой позиции
-    4. Получаем ML-сигналы для всех тикеров
-    5. SELL-сигнал: проверяем рентабельность; закрываем только если чистый PnL > 0
+    3. Получаем дивидендные корректировки через Tinkoff API (кешируются 24ч)
+    4. Проверяем стоп-лосс и тейк-профит для каждой открытой позиции.
+       В экс-дивидендную дату SL-порог понижается на размер дивиденда,
+       чтобы предсказуемый гэп не вызвал ложное срабатывание.
+    5. Получаем ML-сигналы для всех тикеров
+    6. SELL-сигнал: проверяем рентабельность; закрываем только если чистый PnL > 0
        (SL/TP всегда исполняются — это управление риском, не прибылью)
-    6. BUY-сигнал: открываем позицию если нет открытой и confidence >= threshold
+    7. BUY-сигнал: открываем позицию если нет открытой и confidence >= threshold
 
 Безопасность:
     - TRADING_ENABLED=false → тик логируется, но ордера не выставляются
@@ -26,6 +29,8 @@ from db.database import get_session
 from db.models import Asset, Trade
 from db import trade_repo
 from ml.predict import predict_all
+from tinkoff.dividend_gap_stats import get_gap_protection_days_bulk
+from tinkoff.dividends import get_dividend_drops_bulk
 from tinkoff.instruments import get_instrument_by_ticker
 from tinkoff.market_data import get_last_prices
 from trading import state
@@ -102,7 +107,57 @@ class TradingScheduler:
                 ]
                 prices = await get_last_prices(open_figis_list) if open_figis_list else {}
 
-                # ── 4. Проверяем SL/TP (всегда, независимо от рентабельности) ─
+                # ── 4. Дивидендные корректировки SL ──────────────────────────
+                # В экс-дивидендную дату акция падает на размер дивиденда.
+                # Чтобы это предсказуемое падение не вызвало ложное срабатывание
+                # стоп-лосса, понижаем эффективный порог SL на величину дивиденда.
+                # Приоритет: ручные переопределения (.env) → БД (Asset.dividend_gap_days)
+                #            → авто-вычисление из истории → глобальный дефолт.
+                dividend_drops: dict[str, Decimal] = {}
+                if trading_settings.dividend_protection_days > 0:
+                    try:
+                        manual_overrides = trading_settings.dividend_override
+
+                        # Активы с открытыми позициями (для передачи в gap_stats)
+                        open_assets = [
+                            figi_to_asset[figi]
+                            for figi in open_figis_list
+                            if figi in figi_to_asset
+                        ]
+
+                        # Ручные переопределения из .env — наивысший приоритет
+                        manual_per_figi: dict[str, int] = {
+                            a.figi: manual_overrides[a.ticker]
+                            for a in open_assets
+                            if a.ticker in manual_overrides
+                        }
+                        if manual_per_figi:
+                            logger.info(
+                                "Дивидендная защита: ручные переопределения применены",
+                                overrides={
+                                    figi_to_asset[f].ticker: d
+                                    for f, d in manual_per_figi.items()
+                                },
+                            )
+
+                        # Для остальных — читаем из БД (или пересчитываем если устарело)
+                        auto_assets = [a for a in open_assets if a.figi not in manual_per_figi]
+                        auto_per_figi = await get_gap_protection_days_bulk(
+                            auto_assets,
+                            session=session,
+                            fallback=trading_settings.dividend_protection_days,
+                        ) if auto_assets else {}
+
+                        per_figi_days = {**auto_per_figi, **manual_per_figi}
+
+                        dividend_drops = await get_dividend_drops_bulk(
+                            open_figis_list,
+                            per_figi_days=per_figi_days,
+                        )
+                    except Exception as e:
+                        logger.warning("Ошибка получения дивидендных данных", error=str(e))
+
+                # ── 5. Проверяем SL/TP (всегда, независимо от рентабельности) ─
                 for trade in open_trades:
                     figi = asset_id_to_figi.get(trade.asset_id)
                     if not figi:
@@ -115,8 +170,20 @@ class TradingScheduler:
                     if not asset:
                         continue
 
+                    # Корректируем SL на размер дивиденда в экс-дивидендный день
+                    dividend_adj = dividend_drops.get(figi, Decimal("0"))
+                    effective_sl = trade.stop_loss_price - dividend_adj
+                    if dividend_adj > 0:
+                        logger.info(
+                            "Дивидендная защита SL применена",
+                            ticker=asset.ticker,
+                            original_sl=str(trade.stop_loss_price),
+                            effective_sl=str(effective_sl),
+                            dividend_adj=str(dividend_adj),
+                        )
+
                     close_reason: str | None = None
-                    if current_price <= trade.stop_loss_price:
+                    if current_price <= effective_sl:
                         close_reason = "STOP_LOSS"
                     elif current_price >= trade.take_profit_price:
                         close_reason = "TAKE_PROFIT"
@@ -158,7 +225,7 @@ class TradingScheduler:
             else:
                 prices = {}
 
-            # ── 5. ML-сигналы ─────────────────────────────────────────────────
+            # ── 6. ML-сигналы ─────────────────────────────────────────────────
             signals = await predict_all()
             logger.info("Сигналы получены", count=len(signals))
 
@@ -177,7 +244,7 @@ class TradingScheduler:
 
                 figi = asset.figi
 
-                # ── 6. SELL-сигнал: закрываем только если прибыльно ──────────
+                # ── 7. SELL-сигнал: закрываем только если прибыльно ──────────
                 if signal_type == "SELL" and asset.id in open_by_asset:
                     trade = open_by_asset[asset.id]
                     current_price = prices.get(figi) or await _fetch_price(figi)
@@ -226,7 +293,7 @@ class TradingScheduler:
                         tax=breakdown.tax,
                     )
 
-                # ── 7. BUY-сигнал: открываем позицию ─────────────────────────
+                # ── 8. BUY-сигнал: открываем позицию ─────────────────────────
                 elif signal_type == "BUY":
                     if asset.id in open_by_asset:
                         logger.debug("Позиция уже открыта", ticker=ticker)

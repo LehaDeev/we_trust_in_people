@@ -16,6 +16,7 @@ from sqlalchemy import select
 
 from bot.keyboards import (
     back_to_trading,
+    confirm_buy,
     confirm_sell,
     manual_buy_tickers,
     manual_sell_positions,
@@ -101,11 +102,19 @@ async def cb_buy_select(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(lambda c: c.data and c.data.startswith("trading:buy:"))
-async def cb_buy_execute(callback: CallbackQuery) -> None:
-    """Выполнить ручную покупку выбранного тикера."""
+@router.callback_query(
+    lambda c: c.data
+    and c.data.startswith("trading:buy:")
+    and not c.data.startswith("trading:buy:confirm:")
+)
+async def cb_buy_preview(callback: CallbackQuery) -> None:
+    """
+    Показать превью покупки: количество бумаг, сумму, прогноз SL/TP.
+
+    Не исполняет ордер — только отображает детали и кнопку подтверждения.
+    """
     ticker = callback.data.split(":", 2)[2]
-    await callback.answer(f"⏳ Покупаю {ticker}...")
+    await callback.answer(f"⏳ Загружаю данные {ticker}...")
 
     try:
         async with get_session() as session:
@@ -118,16 +127,6 @@ async def cb_buy_execute(callback: CallbackQuery) -> None:
                 await callback.message.edit_text(
                     f"❌ Актив <b>{ticker}</b> не найден в БД.\n"
                     "Запустите сборщик данных.",
-                    reply_markup=back_to_trading(),
-                    parse_mode="HTML",
-                )
-                return
-
-            # Проверить, нет ли уже открытой позиции
-            existing = await trade_repo.get_open_trade_by_asset(session, asset.id)
-            if existing:
-                await callback.message.edit_text(
-                    f"⚠️ По <b>{ticker}</b> уже есть открытая позиция.",
                     reply_markup=back_to_trading(),
                     parse_mode="HTML",
                 )
@@ -149,9 +148,10 @@ async def cb_buy_execute(callback: CallbackQuery) -> None:
 
             lot_size = instrument_info.lot if instrument_info and instrument_info.lot > 0 else 1
             lots = trading_settings.lots_per_ticker
-            needed = current_price * lots * lot_size
+            total_qty = lots * lot_size
+            needed = current_price * total_qty
 
-            # Рассчитать ожидаемый P&L при достижении TP
+            # Прогноз P&L при TP и SL
             sl_pct = Decimal(str(trading_settings.stop_loss_pct))
             tp_pct = Decimal(str(trading_settings.take_profit_pct))
             tp_price = current_price * (Decimal("1") + tp_pct)
@@ -161,19 +161,109 @@ async def cb_buy_execute(callback: CallbackQuery) -> None:
             be_pct = breakeven_pct()
 
             # Проверить баланс
+            open_trades = await trade_repo.get_open_trades(session)
             balance = await get_rub_balance()
-            if balance < needed:
+
+        if balance < needed:
+            await callback.message.edit_text(
+                f"⚠️ <b>Недостаточно средств для покупки {ticker}</b>\n\n"
+                f"Нужно:    <b>{needed:.2f} ₽</b>\n"
+                f"  ({lots} лот × {lot_size} шт × {current_price:.2f} ₽)\n"
+                f"Доступно: <b>{balance:.2f} ₽</b>",
+                reply_markup=back_to_trading(),
+                parse_mode="HTML",
+            )
+            return
+
+        if len(open_trades) >= trading_settings.max_open_positions:
+            await callback.message.edit_text(
+                f"⚠️ Достигнут лимит позиций ({trading_settings.max_open_positions}).",
+                reply_markup=back_to_trading(),
+                parse_mode="HTML",
+            )
+            return
+
+        text = (
+            f"🛒 <b>Покупка: {ticker}</b>\n\n"
+            f"Количество:  <b>{lots} лот × {lot_size} шт = {total_qty} бумаг</b>\n"
+            f"Цена:        <b>{current_price:.2f} ₽</b> за бумагу\n"
+            f"Сумма:       <b>{needed:.2f} ₽</b>\n\n"
+            f"SL (−{sl_pct * 100:.1f}%):  {sl_price:.2f} ₽\n"
+            f"TP (+{tp_pct * 100:.1f}%): {tp_price:.2f} ₽\n\n"
+            f"📊 <b>Прогноз при TP (+{tp_pct * 100:.1f}%):</b>\n"
+            f"Чистая прибыль: <b>+{tp_breakdown.net_pnl:.2f} ₽</b>  "
+            f"(комиссии −{tp_breakdown.buy_commission + tp_breakdown.sell_commission:.2f} ₽, "
+            f"НДФЛ −{tp_breakdown.tax:.2f} ₽)\n"
+            f"📊 <b>Прогноз при SL (−{sl_pct * 100:.1f}%):</b>\n"
+            f"Чистый убыток: <b>{sl_breakdown.net_pnl:.2f} ₽</b>  "
+            f"(комиссии −{sl_breakdown.buy_commission + sl_breakdown.sell_commission:.2f} ₽)\n\n"
+            f"💵 Доступно: {balance:.2f} ₽\n"
+            f"<i>Безубыточность от +{be_pct * 100:.2f}% роста цены</i>"
+        )
+        await callback.message.edit_text(
+            text, reply_markup=confirm_buy(ticker), parse_mode="HTML"
+        )
+
+    except Exception as e:
+        logger.error("Ошибка превью покупки", ticker=ticker, error=str(e))
+        await callback.message.edit_text(
+            f"❌ Ошибка при загрузке данных для <b>{ticker}</b>.",
+            reply_markup=back_to_trading(),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("trading:buy:confirm:"))
+async def cb_buy_confirm(callback: CallbackQuery) -> None:
+    """Выполнить ручную покупку после подтверждения пользователем."""
+    ticker = callback.data.split(":", 3)[3]
+    await callback.answer(f"⏳ Покупаю {ticker}...")
+
+    try:
+        async with get_session() as session:
+            # Найти актив в БД
+            result = await session.execute(
+                select(Asset).where(Asset.ticker == ticker)
+            )
+            asset = result.scalar_one_or_none()
+            if not asset:
                 await callback.message.edit_text(
-                    f"⚠️ <b>Недостаточно средств для покупки {ticker}</b>\n\n"
-                    f"Нужно:    <b>{needed:.2f} ₽</b>\n"
-                    f"  ({lots} лот × {lot_size} шт × {current_price:.2f} ₽)\n"
-                    f"Доступно: <b>{balance:.2f} ₽</b>",
+                    f"❌ Актив <b>{ticker}</b> не найден в БД.",
                     reply_markup=back_to_trading(),
                     parse_mode="HTML",
                 )
                 return
 
-            # Проверить лимит позиций
+            # Получить цену и лот-сайз
+            current_price, instrument_info = await asyncio.gather(
+                get_last_price(asset.figi),
+                get_instrument_by_ticker(ticker),
+            )
+
+            if current_price <= 0:
+                await callback.message.edit_text(
+                    f"❌ Не удалось получить цену для <b>{ticker}</b>.",
+                    reply_markup=back_to_trading(),
+                    parse_mode="HTML",
+                )
+                return
+
+            lot_size = instrument_info.lot if instrument_info and instrument_info.lot > 0 else 1
+            lots = trading_settings.lots_per_ticker
+            total_qty = lots * lot_size
+            needed = current_price * total_qty
+
+            # Повторная проверка баланса и лимита позиций
+            balance = await get_rub_balance()
+            if balance < needed:
+                await callback.message.edit_text(
+                    f"⚠️ <b>Недостаточно средств для покупки {ticker}</b>\n\n"
+                    f"Нужно: <b>{needed:.2f} ₽</b>  |  Доступно: <b>{balance:.2f} ₽</b>",
+                    reply_markup=back_to_trading(),
+                    parse_mode="HTML",
+                )
+                return
+
             open_trades = await trade_repo.get_open_trades(session)
             if len(open_trades) >= trading_settings.max_open_positions:
                 await callback.message.edit_text(
@@ -193,6 +283,14 @@ async def cb_buy_execute(callback: CallbackQuery) -> None:
             )
 
         if trade:
+            tp_pct = Decimal(str(trading_settings.take_profit_pct))
+            sl_pct = Decimal(str(trading_settings.stop_loss_pct))
+            tp_price = current_price * (Decimal("1") + tp_pct)
+            sl_price = current_price * (Decimal("1") - sl_pct)
+            tp_breakdown = calculate_pnl(current_price, tp_price, lots, lot_size)
+            sl_breakdown = calculate_pnl(current_price, sl_price, lots, lot_size)
+            be_pct = breakeven_pct()
+
             await notify_open(
                 ticker=ticker,
                 price=trade.entry_price,
@@ -202,9 +300,10 @@ async def cb_buy_execute(callback: CallbackQuery) -> None:
                 take_profit=trade.take_profit_price,
             )
             text = (
-                f"✅ <b>Куплено: {ticker}</b>\n"
-                f"{lots} лот(ов) × {lot_size} шт = {lots * lot_size} бумаг\n"
-                f"Цена: {trade.entry_price:.2f} ₽  |  Сумма: {needed:.2f} ₽\n"
+                f"✅ <b>Куплено: {ticker}</b>\n\n"
+                f"Количество:  <b>{lots} лот × {lot_size} шт = {total_qty} бумаг</b>\n"
+                f"Цена:        <b>{trade.entry_price:.2f} ₽</b> за бумагу\n"
+                f"Сумма:       <b>{needed:.2f} ₽</b>\n\n"
                 f"SL: {trade.stop_loss_price:.2f} ₽  TP: {trade.take_profit_price:.2f} ₽\n\n"
                 f"📊 <b>Прогноз при TP (+{tp_pct * 100:.1f}%):</b>\n"
                 f"Чистая прибыль: <b>+{tp_breakdown.net_pnl:.2f} ₽</b>  "
@@ -327,7 +426,10 @@ async def cb_sell_preview(callback: CallbackQuery) -> None:
             lot_size=lot_size,
         )
 
-        pnl_icon = "🟢" if breakdown.is_profitable else "🔴"
+        total_qty = trade.lots * lot_size
+        entry_total = trade.entry_price * total_qty
+        exit_total = current_price * total_qty
+
         warning = (
             "\n\n⚠️ <b>Продажа убыточна</b> после комиссий и НДФЛ!\n"
             "Рекомендуем дождаться роста или закрыть через тейк-профит."
@@ -337,11 +439,12 @@ async def cb_sell_preview(callback: CallbackQuery) -> None:
 
         text = (
             f"💸 <b>Продажа: {asset.ticker}</b>\n"
-            f"FIFO — продаётся позиция от {trade.opened_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"FIFO — позиция от {trade.opened_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"Количество:   <b>{trade.lots} лот × {lot_size} шт = {total_qty} бумаг</b>\n"
+            f"Куплено:      <b>{trade.entry_price:.2f} ₽</b> × {total_qty} = {entry_total:.2f} ₽\n"
+            f"Продажа:      <b>{current_price:.2f} ₽</b> × {total_qty} = {exit_total:.2f} ₽\n\n"
             f"{format_pnl_breakdown(breakdown)}"
-            f"{warning}\n\n"
-            f"<i>Текущая цена: {current_price:.2f} ₽  "
-            f"(вход: {trade.entry_price:.2f} ₽)</i>"
+            f"{warning}"
         )
 
         await callback.message.edit_text(

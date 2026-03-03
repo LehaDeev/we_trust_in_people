@@ -16,7 +16,7 @@ from config.settings import trading_settings
 from db.models import Asset, Trade
 from db import trade_repo
 from tinkoff.portfolio import post_market_order
-from trading.profitability import calculate_pnl
+from trading.profitability import adjusted_sl_price, adjusted_tp_price, calculate_pnl
 from utils.logger import logger
 
 
@@ -79,11 +79,10 @@ class TradeExecutor:
             except Exception:
                 pass
 
-        # Рассчитываем уровни SL/TP
-        sl_pct = Decimal(str(trading_settings.stop_loss_pct))
-        tp_pct = Decimal(str(trading_settings.take_profit_pct))
-        stop_loss_price = executed_price * (Decimal("1") - sl_pct)
-        take_profit_price = executed_price * (Decimal("1") + tp_pct)
+        # Рассчитываем уровни SL/TP с учётом комиссий и НДФЛ:
+        # при достижении этих цен чистый P&L будет ровно ±pct от суммы входа
+        stop_loss_price = adjusted_sl_price(executed_price, trading_settings.stop_loss_pct)
+        take_profit_price = adjusted_tp_price(executed_price, trading_settings.take_profit_pct)
 
         trade = Trade(
             asset_id=asset.id,

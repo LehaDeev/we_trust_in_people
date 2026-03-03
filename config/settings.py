@@ -156,6 +156,7 @@ class RedisSettings(BaseSettings):
     candles_ttl: int = Field(300, alias="REDIS_CANDLES_TTL")     # свечи из БД
     portfolio_ttl: int = Field(60, alias="REDIS_PORTFOLIO_TTL")  # портфель из Tinkoff API
     price_ttl: int = Field(30, alias="REDIS_PRICE_TTL")          # последние цены
+    dividend_ttl: int = Field(86400, alias="REDIS_DIVIDEND_TTL") # дивидендные данные (24 часа)
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -213,6 +214,28 @@ class TradingSettings(BaseSettings):
     broker_commission_pct: float = Field(0.003, alias="TRADING_BROKER_COMMISSION_PCT")
     # Ставка НДФЛ на прибыль от продажи (0.13 = 13%, 0.15 = 15% при доходе >5 млн)
     tax_pct: float = Field(0.13, alias="TRADING_TAX_PCT")
+    # Защита от дивидендного гэпа: корректировать SL на размер дивиденда
+    # в течение этого количества дней вокруг экс-дивидендной даты (0 = отключено)
+    dividend_protection_days: int = Field(1, alias="TRADING_DIVIDEND_PROTECTION_DAYS")
+    # Ручное переопределение окна защиты для конкретных тикеров.
+    # Формат: TICKER:дни,TICKER:дни (например SBER:45,GAZP:90).
+    # Эти значения имеют приоритет над авто-вычислением из истории.
+    dividend_override_raw: str = Field("", alias="TRADING_DIVIDEND_OVERRIDE")
+
+    @property
+    def dividend_override(self) -> dict[str, int]:
+        """Парсит SBER:45,GAZP:90 → {"SBER": 45, "GAZP": 90}."""
+        result: dict[str, int] = {}
+        for item in self.dividend_override_raw.split(","):
+            item = item.strip()
+            if ":" not in item:
+                continue
+            ticker, days_str = item.split(":", 1)
+            try:
+                result[ticker.strip().upper()] = int(days_str.strip())
+            except ValueError:
+                pass
+        return result
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

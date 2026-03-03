@@ -166,6 +166,26 @@ def manual_sell_positions(
     return builder.as_markup()
 
 
+def confirm_buy(ticker: str) -> InlineKeyboardMarkup:
+    """
+    Клавиатура подтверждения покупки после просмотра превью.
+
+    Аргументы:
+        ticker: тикер инструмента для покупки.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Подтвердить покупку",
+            callback_data=f"trading:buy:confirm:{ticker}",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(text="◀ Назад к тикерам", callback_data="trading:buy"),
+    )
+    return builder.as_markup()
+
+
 def confirm_sell(trade_id: int) -> InlineKeyboardMarkup:
     """
     Клавиатура подтверждения продажи после просмотра расчёта P&L.

@@ -23,6 +23,12 @@ class Asset(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
+    # Среднее кол-во дней до закрытия дивидендного гэпа (NULL = не вычислено)
+    dividend_gap_days: Mapped[int | None] = mapped_column(nullable=True)
+    # Дата последнего пересчёта (для определения "устарело ли значение")
+    dividend_gap_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
     candles: Mapped[list["Candle"]] = relationship(back_populates="asset")
     signals: Mapped[list["Signal"]] = relationship(back_populates="asset")

@@ -86,6 +86,45 @@ def calculate_pnl(
     )
 
 
+def adjusted_tp_price(entry_price: Decimal, tp_pct: float) -> Decimal:
+    """
+    Рассчитать цену тейк-профита с учётом комиссий и НДФЛ.
+
+    При достижении этой цены чистая прибыль будет равна tp_pct × стоимость покупки.
+    Формула: exit = entry × [(1+c) + tp_pct/(1−t)] / (1−c)
+
+    Аргументы:
+        entry_price: цена покупки (за 1 бумагу)
+        tp_pct: желаемая чистая прибыль как доля от вложений (0.05 = 5%)
+
+    Возвращает:
+        Цена, при которой net_pnl = tp_pct × entry_total
+    """
+    c = Decimal(str(trading_settings.broker_commission_pct))
+    t = Decimal(str(trading_settings.tax_pct))
+    tp = Decimal(str(tp_pct))
+    return entry_price * ((1 + c) + tp / (1 - t)) / (1 - c)
+
+
+def adjusted_sl_price(entry_price: Decimal, sl_pct: float) -> Decimal:
+    """
+    Рассчитать цену стоп-лосса с учётом комиссий (без НДФЛ — убыток).
+
+    При достижении этой цены чистый убыток будет равен sl_pct × стоимость покупки.
+    Формула: exit = entry × (1 + c − sl_pct) / (1−c)
+
+    Аргументы:
+        entry_price: цена покупки (за 1 бумагу)
+        sl_pct: допустимый чистый убыток как доля от вложений (0.03 = 3%)
+
+    Возвращает:
+        Цена, при которой net_pnl = −sl_pct × entry_total
+    """
+    c = Decimal(str(trading_settings.broker_commission_pct))
+    sl = Decimal(str(sl_pct))
+    return entry_price * (1 + c - sl) / (1 - c)
+
+
 def breakeven_pct() -> Decimal:
     """
     Минимальный процент роста цены для безубыточной продажи.
