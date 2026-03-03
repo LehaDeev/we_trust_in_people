@@ -144,25 +144,29 @@ async def get_last_prices(instrument_ids: list[str]) -> dict[str, Decimal]:
             response = await client.market_data.get_last_prices(
                 instrument_id=missing,
             )
-        fresh = {
-            p.instrument_uid: quotation_to_decimal(p.price)
-            for p in response.last_prices
-        }
+        # Индексируем по instrument_uid И по figi — чтобы lookup работал
+        # вне зависимости от того, чем вызвали функцию (FIGI или UID)
+        fresh: dict[str, Decimal] = {}
+        for p in response.last_prices:
+            price = quotation_to_decimal(p.price)
+            fresh[p.instrument_uid] = price
+            if p.figi:
+                fresh[p.figi] = price
         prices.update(fresh)
 
         # ── Redis: сохраняем новые цены ──────────────────────────────────────
         if redis is not None:
-            for uid, price in fresh.items():
+            for key, price in fresh.items():
                 try:
                     await redis.setex(
-                        f"last_price:{uid}",
+                        f"last_price:{key}",
                         redis_settings.price_ttl,
                         str(price),
                     )
                 except Exception as e:
-                    logger.warning("Redis setex error", key=f"last_price:{uid}", error=str(e))
+                    logger.warning("Redis setex error", key=f"last_price:{key}", error=str(e))
 
-        logger.debug("Last prices fetched from API", count=len(fresh))
+        logger.debug("Last prices fetched from API", count=len(response.last_prices))
 
     logger.debug("Last prices total", total=len(prices), from_cache=len(instrument_ids) - len(missing))
     return prices
