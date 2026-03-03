@@ -6,8 +6,9 @@
     2. Получаем текущие цены инструментов
     3. Проверяем стоп-лосс и тейк-профит для каждой открытой позиции
     4. Получаем ML-сигналы для всех тикеров
-    5. Открываем позиции по BUY-сигналам (если нет открытой позиции)
-    6. Закрываем позиции по SELL-сигналам
+    5. SELL-сигнал: проверяем рентабельность; закрываем только если чистый PnL > 0
+       (SL/TP всегда исполняются — это управление риском, не прибылью)
+    6. BUY-сигнал: открываем позицию если нет открытой и confidence >= threshold
 
 Безопасность:
     - TRADING_ENABLED=false → тик логируется, но ордера не выставляются
@@ -25,10 +26,12 @@ from db.database import get_session
 from db.models import Asset, Trade
 from db import trade_repo
 from ml.predict import predict_all
+from tinkoff.instruments import get_instrument_by_ticker
 from tinkoff.market_data import get_last_prices
 from trading import state
 from trading.executor import TradeExecutor
 from trading.notifier import notify_close, notify_open
+from trading.profitability import calculate_pnl
 from utils.logger import logger
 
 
@@ -88,29 +91,18 @@ class TradingScheduler:
             all_assets = list(result.scalars().all())
             figi_to_asset: dict[str, Asset] = {a.figi: a for a in all_assets}
             ticker_to_asset: dict[str, Asset] = {a.ticker: a for a in all_assets}
-
-            # ── 3. Текущие цены для всех открытых позиций ────────────────────
-            open_figis = [
-                figi_to_asset[a_id].figi
-                for a_id in open_by_asset
-                if a_id in {a.id for a in all_assets}
-                and any(a.id == a_id for a in all_assets)
-            ]
-            # Строим map asset_id → figi для открытых позиций
             asset_id_to_figi: dict[int, str] = {a.id: a.figi for a in all_assets}
 
+            # ── 3. Текущие цены для открытых позиций ─────────────────────────
             if open_trades:
                 open_figis_list = [
                     asset_id_to_figi[t.asset_id]
                     for t in open_trades
                     if t.asset_id in asset_id_to_figi
                 ]
-                if open_figis_list:
-                    prices = await get_last_prices(open_figis_list)
-                else:
-                    prices = {}
+                prices = await get_last_prices(open_figis_list) if open_figis_list else {}
 
-                # ── 4. Проверяем SL/TP ────────────────────────────────────────
+                # ── 4. Проверяем SL/TP (всегда, независимо от рентабельности) ─
                 for trade in open_trades:
                     figi = asset_id_to_figi.get(trade.asset_id)
                     if not figi:
@@ -130,6 +122,20 @@ class TradingScheduler:
                         close_reason = "TAKE_PROFIT"
 
                     if close_reason:
+                        lot_size = getattr(trade, "lot_size", 1) or 1
+                        breakdown = calculate_pnl(
+                            entry_price=trade.entry_price,
+                            exit_price=current_price,
+                            lots=trade.lots,
+                            lot_size=lot_size,
+                        )
+                        logger.info(
+                            "Срабатывание SL/TP",
+                            ticker=asset.ticker,
+                            reason=close_reason,
+                            gross_pnl=str(breakdown.gross_pnl),
+                            net_pnl=str(breakdown.net_pnl),
+                        )
                         closed_trade = await self._executor.close_position(
                             session=session,
                             trade=trade,
@@ -138,14 +144,16 @@ class TradingScheduler:
                             current_price=current_price,
                             reason=close_reason,
                         )
-                        # Убираем из карты открытых — позиция уже закрыта
                         open_by_asset.pop(trade.asset_id, None)
                         await notify_close(
                             ticker=asset.ticker,
                             entry_price=trade.entry_price,
                             exit_price=closed_trade.exit_price or current_price,
                             reason=close_reason,
-                            pnl=closed_trade.pnl or Decimal("0"),
+                            net_pnl=closed_trade.pnl or Decimal("0"),
+                            gross_pnl=breakdown.gross_pnl,
+                            commission=breakdown.buy_commission + breakdown.sell_commission,
+                            tax=breakdown.tax,
                         )
             else:
                 prices = {}
@@ -154,7 +162,6 @@ class TradingScheduler:
             signals = await predict_all()
             logger.info("Сигналы получены", count=len(signals))
 
-            # Количество реально открытых позиций после проверки SL/TP
             open_count = len(open_by_asset)
             max_positions = trading_settings.max_open_positions
 
@@ -170,28 +177,54 @@ class TradingScheduler:
 
                 figi = asset.figi
 
-                # ── 6. SELL-сигнал: закрываем открытую позицию ───────────────
+                # ── 6. SELL-сигнал: закрываем только если прибыльно ──────────
                 if signal_type == "SELL" and asset.id in open_by_asset:
                     trade = open_by_asset[asset.id]
                     current_price = prices.get(figi) or await _fetch_price(figi)
-                    if current_price > 0:
-                        closed_trade = await self._executor.close_position(
-                            session=session,
-                            trade=trade,
-                            asset=asset,
-                            instrument_uid=figi,
-                            current_price=current_price,
-                            reason="SELL_SIGNAL",
-                        )
-                        open_by_asset.pop(asset.id, None)
-                        open_count -= 1
-                        await notify_close(
+                    if current_price <= 0:
+                        continue
+
+                    lot_size = getattr(trade, "lot_size", 1) or 1
+                    breakdown = calculate_pnl(
+                        entry_price=trade.entry_price,
+                        exit_price=current_price,
+                        lots=trade.lots,
+                        lot_size=lot_size,
+                    )
+
+                    if not breakdown.is_profitable:
+                        # Продажа убыточна после комиссий/налога — ждём лучшей цены
+                        logger.info(
+                            "SELL-сигнал: продажа нерентабельна, позиция удерживается",
                             ticker=ticker,
-                            entry_price=trade.entry_price,
-                            exit_price=closed_trade.exit_price or current_price,
-                            reason="SELL_SIGNAL",
-                            pnl=closed_trade.pnl or Decimal("0"),
+                            gross_pnl=str(breakdown.gross_pnl),
+                            net_pnl=str(breakdown.net_pnl),
+                            commission=str(
+                                breakdown.buy_commission + breakdown.sell_commission
+                            ),
                         )
+                        continue
+
+                    closed_trade = await self._executor.close_position(
+                        session=session,
+                        trade=trade,
+                        asset=asset,
+                        instrument_uid=figi,
+                        current_price=current_price,
+                        reason="SELL_SIGNAL",
+                    )
+                    open_by_asset.pop(asset.id, None)
+                    open_count -= 1
+                    await notify_close(
+                        ticker=ticker,
+                        entry_price=trade.entry_price,
+                        exit_price=closed_trade.exit_price or current_price,
+                        reason="SELL_SIGNAL",
+                        net_pnl=closed_trade.pnl or Decimal("0"),
+                        gross_pnl=breakdown.gross_pnl,
+                        commission=breakdown.buy_commission + breakdown.sell_commission,
+                        tax=breakdown.tax,
+                    )
 
                 # ── 7. BUY-сигнал: открываем позицию ─────────────────────────
                 elif signal_type == "BUY":
@@ -221,11 +254,15 @@ class TradingScheduler:
                         logger.warning("Не удалось получить цену", ticker=ticker)
                         continue
 
+                    # Получаем размер лота через API (с graceful degradation)
+                    lot_size = await _get_lot_size(ticker)
+
                     new_trade = await self._executor.open_position(
                         session=session,
                         asset=asset,
                         instrument_uid=figi,
                         current_price=current_price,
+                        lot_size=lot_size,
                     )
                     if new_trade:
                         open_by_asset[asset.id] = new_trade
@@ -234,21 +271,17 @@ class TradingScheduler:
                             ticker=ticker,
                             price=new_trade.entry_price,
                             lots=new_trade.lots,
+                            lot_size=lot_size,
                             stop_loss=new_trade.stop_loss_price,
                             take_profit=new_trade.take_profit_price,
                         )
 
-        logger.info(
-            "Тик завершён",
-            open_positions=open_count,
-        )
+        logger.info("Тик завершён", open_positions=open_count)
 
 
 async def _fetch_price(figi: str) -> Decimal:
     """
     Получить текущую цену одного инструмента.
-
-    Вспомогательная функция для случаев когда цена не была загружена заранее.
 
     Аргументы:
         figi: FIGI инструмента
@@ -262,3 +295,23 @@ async def _fetch_price(figi: str) -> Decimal:
     except Exception as e:
         logger.error("Ошибка получения цены", figi=figi, error=str(e))
         return Decimal("0")
+
+
+async def _get_lot_size(ticker: str) -> int:
+    """
+    Получить количество бумаг в 1 лоте для тикера.
+
+    Использует API Tinkoff; при ошибке возвращает 1 (безопасный дефолт).
+
+    Аргументы:
+        ticker: тикер инструмента
+
+    Возвращает:
+        Размер лота (>= 1).
+    """
+    try:
+        info = await get_instrument_by_ticker(ticker)
+        return info.lot if info and info.lot > 0 else 1
+    except Exception as e:
+        logger.warning("Не удалось получить lot_size", ticker=ticker, error=str(e))
+        return 1

@@ -89,11 +89,12 @@ async def get_open_trade_by_asset(
     Возвращает:
         Trade если открытая позиция существует, иначе None.
     """
+    # ORDER BY opened_at ASC — правило FIFO: продаём самую раннюю позицию первой
     result = await session.execute(
         select(Trade).where(
             Trade.asset_id == asset_id,
             Trade.status == "OPEN",
-        )
+        ).order_by(Trade.opened_at.asc())
     )
     return result.scalars().first()
 

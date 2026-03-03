@@ -60,6 +60,7 @@ async def notify_open(
     ticker: str,
     price: Decimal,
     lots: int,
+    lot_size: int,
     stop_loss: Decimal,
     take_profit: Decimal,
 ) -> None:
@@ -68,14 +69,18 @@ async def notify_open(
 
     Аргументы:
         ticker:      тикер инструмента (например "SBER")
-        price:       цена входа
+        price:       цена входа за 1 бумагу
         lots:        количество купленных лотов
+        lot_size:    количество бумаг в 1 лоте
         stop_loss:   уровень стоп-лосса
         take_profit: уровень тейк-профита
     """
+    total_qty = lots * lot_size
+    total_cost = price * total_qty
     text = (
         f"🟢 <b>Открыта позиция {ticker}</b>\n"
-        f"Куплено: {lots} лот(ов) по <b>{price:.2f} ₽</b>\n"
+        f"Куплено: {lots} лот × {lot_size} шт = {total_qty} бумаг\n"
+        f"Цена: <b>{price:.2f} ₽</b>  Сумма: <b>{total_cost:.2f} ₽</b>\n"
         f"Стоп-лосс:   {stop_loss:.2f} ₽\n"
         f"Тейк-профит: {take_profit:.2f} ₽"
     )
@@ -87,17 +92,23 @@ async def notify_close(
     entry_price: Decimal,
     exit_price: Decimal,
     reason: str,
-    pnl: Decimal,
+    net_pnl: Decimal,
+    gross_pnl: Decimal,
+    commission: Decimal,
+    tax: Decimal,
 ) -> None:
     """
-    Уведомить о закрытии позиции.
+    Уведомить о закрытии позиции с детальным расчётом P&L.
 
     Аргументы:
         ticker:      тикер инструмента
-        entry_price: цена входа
-        exit_price:  цена выхода
-        reason:      причина закрытия ("SELL_SIGNAL" | "STOP_LOSS" | "TAKE_PROFIT")
-        pnl:         финансовый результат сделки в рублях
+        entry_price: цена входа за 1 бумагу
+        exit_price:  цена выхода за 1 бумагу
+        reason:      причина закрытия ("SELL_SIGNAL" | "STOP_LOSS" | "TAKE_PROFIT" | "MANUAL")
+        net_pnl:     чистая прибыль после комиссий и НДФЛ
+        gross_pnl:   прибыль до комиссий и налога
+        commission:  суммарная комиссия (покупка + продажа)
+        tax:         удержанный НДФЛ
     """
     emoji_map = {
         "STOP_LOSS": "🔴",
@@ -114,12 +125,18 @@ async def notify_close(
 
     emoji = emoji_map.get(reason, "⚪")
     label = reason_label.get(reason, reason)
-    pnl_sign = "+" if pnl >= 0 else ""
+    gross_sign = "+" if gross_pnl >= 0 else ""
+    net_sign = "+" if net_pnl >= 0 else ""
 
     text = (
         f"{emoji} <b>Закрыта позиция {ticker}</b>\n"
         f"Причина: {label}\n"
         f"Вход: {entry_price:.2f} ₽ → Выход: {exit_price:.2f} ₽\n"
-        f"PnL: <b>{pnl_sign}{pnl:.2f} ₽</b>"
+        f"─────────────────\n"
+        f"Gross P&L:  {gross_sign}{gross_pnl:.2f} ₽\n"
+        f"Комиссии:  −{commission:.2f} ₽\n"
+        f"НДФЛ:      −{tax:.2f} ₽\n"
+        f"─────────────────\n"
+        f"<b>Чистый P&L: {net_sign}{net_pnl:.2f} ₽</b>"
     )
     await _send(text)

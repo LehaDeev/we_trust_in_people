@@ -78,6 +78,8 @@ class Trade(Base):
     # ID заявки в Tinkoff (None если ордер не был выставлен)
     order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     lots: Mapped[int]
+    # Количество бумаг в 1 лоте на момент открытия (нужно для корректного PnL)
+    lot_size: Mapped[int] = mapped_column(default=1, server_default="1")
     # Цена открытия позиции (цена исполнения ордера)
     entry_price: Mapped[Decimal] = mapped_column(Numeric(18, 6))
     # Цена закрытия (None пока позиция открыта)

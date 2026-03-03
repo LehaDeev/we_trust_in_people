@@ -121,6 +121,7 @@ def manual_sell_positions(
 ) -> InlineKeyboardMarkup:
     """
     Список открытых позиций для ручной продажи.
+    Кнопка ведёт на превью-расчёт перед подтверждением.
 
     Аргументы:
         positions: список кортежей (trade_id, ticker, entry_price_str).
@@ -130,10 +131,31 @@ def manual_sell_positions(
         builder.row(
             InlineKeyboardButton(
                 text=f"{ticker}  {price_str} ₽",
-                callback_data=f"trading:sell:{trade_id}",
+                # preview — сначала показываем расчёт P&L, потом confirm
+                callback_data=f"trading:sell:preview:{trade_id}",
             )
         )
     builder.row(InlineKeyboardButton(text="◀ Назад", callback_data="menu:trading"))
+    return builder.as_markup()
+
+
+def confirm_sell(trade_id: int) -> InlineKeyboardMarkup:
+    """
+    Клавиатура подтверждения продажи после просмотра расчёта P&L.
+
+    Аргументы:
+        trade_id: ID сделки для продажи.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text="✅ Подтвердить продажу",
+            callback_data=f"trading:sell:confirm:{trade_id}",
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(text="◀ Назад к позициям", callback_data="trading:sell"),
+    )
     return builder.as_markup()
 
 

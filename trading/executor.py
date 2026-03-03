@@ -3,6 +3,7 @@
 
 Использует рыночные ордера через tinkoff/portfolio.py.
 Сохраняет и обновляет объекты Trade через trade_repo.
+PnL рассчитывается через trading/profitability.py (чистый, после комиссий и НДФЛ).
 """
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -15,6 +16,7 @@ from config.settings import trading_settings
 from db.models import Asset, Trade
 from db import trade_repo
 from tinkoff.portfolio import post_market_order
+from trading.profitability import calculate_pnl
 from utils.logger import logger
 
 
@@ -27,6 +29,7 @@ class TradeExecutor:
         asset: Asset,
         instrument_uid: str,
         current_price: Decimal,
+        lot_size: int = 1,
     ) -> Trade | None:
         """
         Открыть длинную позицию по рыночной цене.
@@ -38,7 +41,8 @@ class TradeExecutor:
             session:        активная async-сессия SQLAlchemy
             asset:          объект Asset (тикер, id)
             instrument_uid: UID инструмента для Tinkoff API
-            current_price:  текущая цена (используется для расчёта SL/TP)
+            current_price:  текущая цена за 1 бумагу (используется для расчёта SL/TP)
+            lot_size:       количество бумаг в 1 лоте
 
         Возвращает:
             Trade с status='OPEN' при успехе, None при ошибке API.
@@ -49,6 +53,7 @@ class TradeExecutor:
             "Открываем позицию",
             ticker=asset.ticker,
             lots=lots,
+            lot_size=lot_size,
             price=str(current_price),
         )
 
@@ -84,6 +89,7 @@ class TradeExecutor:
             asset_id=asset.id,
             order_id=response.order_id,
             lots=lots,
+            lot_size=lot_size,
             entry_price=executed_price,
             stop_loss_price=stop_loss_price,
             take_profit_price=take_profit_price,
@@ -96,6 +102,7 @@ class TradeExecutor:
             ticker=asset.ticker,
             trade_id=trade.id,
             entry_price=str(trade.entry_price),
+            lot_size=lot_size,
             stop_loss=str(stop_loss_price),
             take_profit=str(take_profit_price),
         )
@@ -113,16 +120,16 @@ class TradeExecutor:
         """
         Закрыть открытую позицию рыночным ордером SELL.
 
-        Выставляет рыночный ордер SELL, рассчитывает PnL,
-        обновляет Trade в базе данных (status='CLOSED').
+        Выставляет рыночный ордер SELL, рассчитывает чистый PnL
+        (с учётом комиссий брокера и НДФЛ), обновляет Trade в БД (status='CLOSED').
 
         Аргументы:
             session:        активная async-сессия SQLAlchemy
             trade:          открытая сделка (Trade со status='OPEN')
             asset:          объект Asset (тикер)
             instrument_uid: UID инструмента для Tinkoff API
-            current_price:  текущая цена (используется для расчёта PnL если API не вернул)
-            reason:         причина закрытия ("SELL_SIGNAL" | "STOP_LOSS" | "TAKE_PROFIT")
+            current_price:  текущая цена за 1 бумагу (используется если API не вернул цену)
+            reason:         причина закрытия ("SELL_SIGNAL" | "STOP_LOSS" | "TAKE_PROFIT" | "MANUAL")
 
         Возвращает:
             Обновлённый Trade с status='CLOSED'.
@@ -154,16 +161,22 @@ class TradeExecutor:
                 trade_id=trade.id,
                 error=str(e),
             )
-            # Даже при ошибке API помечаем позицию закрытой (позиция уже может быть закрыта)
             exit_price = current_price
 
-        # PnL = (цена выхода - цена входа) × количество лотов
-        pnl = (exit_price - trade.entry_price) * trade.lots
+        # Чистый PnL: учитываем комиссии и НДФЛ
+        lot_size = getattr(trade, "lot_size", 1) or 1
+        breakdown = calculate_pnl(
+            entry_price=trade.entry_price,
+            exit_price=exit_price,
+            lots=trade.lots,
+            lot_size=lot_size,
+        )
+        net_pnl = breakdown.net_pnl
 
         trade.exit_price = exit_price
         trade.status = "CLOSED"
         trade.close_reason = reason
-        trade.pnl = pnl
+        trade.pnl = net_pnl
         trade.closed_at = datetime.now(timezone.utc)
         trade = await trade_repo.update_trade(session, trade)
 
@@ -174,6 +187,9 @@ class TradeExecutor:
             reason=reason,
             entry_price=str(trade.entry_price),
             exit_price=str(exit_price),
-            pnl=str(pnl),
+            gross_pnl=str(breakdown.gross_pnl),
+            commission=str(breakdown.buy_commission + breakdown.sell_commission),
+            tax=str(breakdown.tax),
+            net_pnl=str(net_pnl),
         )
         return trade

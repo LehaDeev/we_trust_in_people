@@ -1,12 +1,13 @@
 """
 Handlers for auto/manual trading section:
     - trading menu with mode toggle
-    - open positions list
+    - open positions list with unrealized P&L
     - trade history
-    - trading settings
-    - manual buy (ticker select -> execute)
-    - manual sell (position select -> execute)
+    - trading settings (incl. commission and tax)
+    - manual buy (ticker select -> balance/lot check -> execute)
+    - manual sell (position select -> P&L preview -> confirm -> execute)
 """
+import asyncio
 from decimal import Decimal
 
 from aiogram import Router
@@ -15,6 +16,7 @@ from sqlalchemy import select
 
 from bot.keyboards import (
     back_to_trading,
+    confirm_sell,
     manual_buy_tickers,
     manual_sell_positions,
     trading_menu,
@@ -24,11 +26,16 @@ from db.database import get_session
 from db import trade_repo
 from db.models import Asset, Trade
 from tinkoff.instruments import get_instrument_by_ticker
-from tinkoff.market_data import get_last_price
+from tinkoff.market_data import get_last_price, get_last_prices
 from tinkoff.portfolio import get_rub_balance
 from trading import state
 from trading.executor import TradeExecutor
 from trading.notifier import notify_close, notify_open
+from trading.profitability import (
+    breakeven_pct,
+    calculate_pnl,
+    format_pnl_breakdown,
+)
 from utils.logger import logger
 
 router = Router(name="trading")
@@ -126,8 +133,12 @@ async def cb_buy_execute(callback: CallbackQuery) -> None:
                 )
                 return
 
-            # Получить текущую цену
-            current_price = await get_last_price(asset.figi)
+            # Получить текущую цену и размер лота параллельно
+            current_price, instrument_info = await asyncio.gather(
+                get_last_price(asset.figi),
+                get_instrument_by_ticker(ticker),
+            )
+
             if current_price <= 0:
                 await callback.message.edit_text(
                     f"❌ Не удалось получить цену для <b>{ticker}</b>.",
@@ -136,16 +147,26 @@ async def cb_buy_execute(callback: CallbackQuery) -> None:
                 )
                 return
 
-            # Получить размер лота и проверить баланс
-            instrument_info = await get_instrument_by_ticker(ticker)
-            lot_size = instrument_info.lot if instrument_info else 1
-            needed = current_price * trading_settings.lots_per_ticker * lot_size
+            lot_size = instrument_info.lot if instrument_info and instrument_info.lot > 0 else 1
+            lots = trading_settings.lots_per_ticker
+            needed = current_price * lots * lot_size
+
+            # Рассчитать ожидаемый P&L при достижении TP
+            sl_pct = Decimal(str(trading_settings.stop_loss_pct))
+            tp_pct = Decimal(str(trading_settings.take_profit_pct))
+            tp_price = current_price * (Decimal("1") + tp_pct)
+            sl_price = current_price * (Decimal("1") - sl_pct)
+            tp_breakdown = calculate_pnl(current_price, tp_price, lots, lot_size)
+            sl_breakdown = calculate_pnl(current_price, sl_price, lots, lot_size)
+            be_pct = breakeven_pct()
+
+            # Проверить баланс
             balance = await get_rub_balance()
             if balance < needed:
                 await callback.message.edit_text(
                     f"⚠️ <b>Недостаточно средств для покупки {ticker}</b>\n\n"
-                    f"Нужно:    <b>{needed:.2f} ₽</b>  "
-                    f"({trading_settings.lots_per_ticker} лот × {lot_size} шт × {current_price:.2f} ₽)\n"
+                    f"Нужно:    <b>{needed:.2f} ₽</b>\n"
+                    f"  ({lots} лот × {lot_size} шт × {current_price:.2f} ₽)\n"
                     f"Доступно: <b>{balance:.2f} ₽</b>",
                     reply_markup=back_to_trading(),
                     parse_mode="HTML",
@@ -168,6 +189,7 @@ async def cb_buy_execute(callback: CallbackQuery) -> None:
                 asset=asset,
                 instrument_uid=asset.figi,
                 current_price=current_price,
+                lot_size=lot_size,
             )
 
         if trade:
@@ -175,14 +197,23 @@ async def cb_buy_execute(callback: CallbackQuery) -> None:
                 ticker=ticker,
                 price=trade.entry_price,
                 lots=trade.lots,
+                lot_size=lot_size,
                 stop_loss=trade.stop_loss_price,
                 take_profit=trade.take_profit_price,
             )
             text = (
                 f"✅ <b>Куплено: {ticker}</b>\n"
-                f"{trade.lots} лот(ов) по {trade.entry_price:.2f} ₽\n"
-                f"SL: {trade.stop_loss_price:.2f} ₽  "
-                f"TP: {trade.take_profit_price:.2f} ₽"
+                f"{lots} лот(ов) × {lot_size} шт = {lots * lot_size} бумаг\n"
+                f"Цена: {trade.entry_price:.2f} ₽  |  Сумма: {needed:.2f} ₽\n"
+                f"SL: {trade.stop_loss_price:.2f} ₽  TP: {trade.take_profit_price:.2f} ₽\n\n"
+                f"📊 <b>Прогноз при TP (+{tp_pct * 100:.1f}%):</b>\n"
+                f"Чистая прибыль: <b>+{tp_breakdown.net_pnl:.2f} ₽</b>  "
+                f"(комиссии −{tp_breakdown.buy_commission + tp_breakdown.sell_commission:.2f} ₽, "
+                f"НДФЛ −{tp_breakdown.tax:.2f} ₽)\n"
+                f"📊 <b>Прогноз при SL (−{sl_pct * 100:.1f}%):</b>\n"
+                f"Чистый убыток: <b>{sl_breakdown.net_pnl:.2f} ₽</b>  "
+                f"(комиссии −{sl_breakdown.buy_commission + sl_breakdown.sell_commission:.2f} ₽)\n\n"
+                f"<i>Безубыточность от +{be_pct * 100:.2f}% роста цены</i>"
             )
         else:
             text = f"❌ Не удалось открыть позицию по <b>{ticker}</b>."
@@ -196,7 +227,7 @@ async def cb_buy_execute(callback: CallbackQuery) -> None:
     )
 
 
-# ── Ручная продажа ────────────────────────────────────────────────────────────
+# ── Ручная продажа: список → превью → подтверждение ──────────────────────────
 
 @router.callback_query(lambda c: c.data == "trading:sell")
 async def cb_sell_select(callback: CallbackQuery) -> None:
@@ -226,7 +257,8 @@ async def cb_sell_select(callback: CallbackQuery) -> None:
         ]
 
         await callback.message.edit_text(
-            "💸 <b>Ручная продажа</b>\n\nВыбери позицию:",
+            "💸 <b>Ручная продажа</b>\n\n"
+            "Выбери позицию для просмотра расчёта P&L:",
             reply_markup=manual_sell_positions(positions),
             parse_mode="HTML",
         )
@@ -239,10 +271,98 @@ async def cb_sell_select(callback: CallbackQuery) -> None:
         )
 
 
-@router.callback_query(lambda c: c.data and c.data.startswith("trading:sell:"))
+@router.callback_query(lambda c: c.data and c.data.startswith("trading:sell:preview:"))
+async def cb_sell_preview(callback: CallbackQuery) -> None:
+    """
+    Показать расчёт P&L перед продажей.
+
+    FIFO: продаётся позиция с самой ранней датой открытия по данному активу.
+    Показывает breakdown: gross, комиссии, НДФЛ, net — и кнопку подтверждения.
+    """
+    trade_id_str = callback.data.split(":", 3)[3]
+    try:
+        trade_id = int(trade_id_str)
+    except ValueError:
+        await callback.answer("Некорректный ID сделки")
+        return
+
+    await callback.answer("⏳ Рассчитываю P&L...")
+
+    try:
+        async with get_session() as session:
+            result = await session.execute(
+                select(Trade).where(Trade.id == trade_id, Trade.status == "OPEN")
+            )
+            trade = result.scalar_one_or_none()
+            if not trade:
+                await callback.message.edit_text(
+                    "⚠️ Позиция не найдена или уже закрыта.",
+                    reply_markup=back_to_trading(),
+                    parse_mode="HTML",
+                )
+                return
+
+            asset_result = await session.execute(
+                select(Asset).where(Asset.id == trade.asset_id)
+            )
+            asset = asset_result.scalar_one_or_none()
+            if not asset:
+                await callback.message.edit_text(
+                    "❌ Актив не найден.",
+                    reply_markup=back_to_trading(),
+                    parse_mode="HTML",
+                )
+                return
+
+        # Текущая цена
+        current_price = await get_last_price(asset.figi)
+        if current_price <= 0:
+            current_price = trade.entry_price
+
+        lot_size = getattr(trade, "lot_size", 1) or 1
+        breakdown = calculate_pnl(
+            entry_price=trade.entry_price,
+            exit_price=current_price,
+            lots=trade.lots,
+            lot_size=lot_size,
+        )
+
+        pnl_icon = "🟢" if breakdown.is_profitable else "🔴"
+        warning = (
+            "\n\n⚠️ <b>Продажа убыточна</b> после комиссий и НДФЛ!\n"
+            "Рекомендуем дождаться роста или закрыть через тейк-профит."
+            if not breakdown.is_profitable
+            else ""
+        )
+
+        text = (
+            f"💸 <b>Продажа: {asset.ticker}</b>\n"
+            f"FIFO — продаётся позиция от {trade.opened_at.strftime('%d.%m.%Y %H:%M')}\n\n"
+            f"{format_pnl_breakdown(breakdown)}"
+            f"{warning}\n\n"
+            f"<i>Текущая цена: {current_price:.2f} ₽  "
+            f"(вход: {trade.entry_price:.2f} ₽)</i>"
+        )
+
+        await callback.message.edit_text(
+            text,
+            reply_markup=confirm_sell(trade_id),
+            parse_mode="HTML",
+        )
+
+    except Exception as e:
+        logger.error("Ошибка расчёта P&L при продаже", trade_id=trade_id, error=str(e))
+        await callback.message.edit_text(
+            "❌ Не удалось рассчитать P&L.",
+            reply_markup=back_to_trading(),
+            parse_mode="HTML",
+        )
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("trading:sell:confirm:"))
 async def cb_sell_execute(callback: CallbackQuery) -> None:
-    """Выполнить ручную продажу выбранной позиции."""
-    trade_id_str = callback.data.split(":", 2)[2]
+    """Выполнить ручную продажу после подтверждения пользователем."""
+    trade_id_str = callback.data.split(":", 3)[3]
     try:
         trade_id = int(trade_id_str)
     except ValueError:
@@ -281,6 +401,14 @@ async def cb_sell_execute(callback: CallbackQuery) -> None:
             if current_price <= 0:
                 current_price = trade.entry_price
 
+            lot_size = getattr(trade, "lot_size", 1) or 1
+            breakdown = calculate_pnl(
+                entry_price=trade.entry_price,
+                exit_price=current_price,
+                lots=trade.lots,
+                lot_size=lot_size,
+            )
+
             closed_trade = await _executor.close_position(
                 session=session,
                 trade=trade,
@@ -290,19 +418,23 @@ async def cb_sell_execute(callback: CallbackQuery) -> None:
                 reason="MANUAL",
             )
 
-        pnl = closed_trade.pnl or Decimal("0")
-        pnl_sign = "+" if pnl >= 0 else ""
+        net_pnl = closed_trade.pnl or Decimal("0")
+        net_sign = "+" if net_pnl >= 0 else ""
         await notify_close(
             ticker=asset.ticker,
             entry_price=trade.entry_price,
             exit_price=closed_trade.exit_price or current_price,
             reason="MANUAL",
-            pnl=pnl,
+            net_pnl=net_pnl,
+            gross_pnl=breakdown.gross_pnl,
+            commission=breakdown.buy_commission + breakdown.sell_commission,
+            tax=breakdown.tax,
         )
         text = (
             f"✅ <b>Продано: {asset.ticker}</b>\n"
-            f"Вход: {trade.entry_price:.2f} ₽ → Выход: {closed_trade.exit_price:.2f} ₽\n"
-            f"PnL: <b>{pnl_sign}{pnl:.2f} ₽</b>"
+            f"Вход: {trade.entry_price:.2f} ₽ → Выход: {closed_trade.exit_price:.2f} ₽\n\n"
+            f"{format_pnl_breakdown(breakdown)}\n\n"
+            f"<b>Итого: {net_sign}{net_pnl:.2f} ₽</b>"
         )
     except Exception as e:
         logger.error("Ошибка ручной продажи", trade_id=trade_id, error=str(e))
@@ -317,7 +449,7 @@ async def cb_sell_execute(callback: CallbackQuery) -> None:
 
 @router.callback_query(lambda c: c.data == "trading:positions")
 async def cb_positions(callback: CallbackQuery) -> None:
-    """Показать все открытые позиции из базы данных."""
+    """Показать все открытые позиции с нереализованным P&L."""
     await callback.answer("⏳ Загружаю позиции...")
     try:
         async with get_session() as session:
@@ -334,15 +466,42 @@ async def cb_positions(callback: CallbackQuery) -> None:
         if not trades:
             text = "📋 <b>Открытые позиции</b>\n\nПозиций нет."
         else:
+            # Получаем текущие цены для всех позиций одним запросом
+            figis = [assets[t.asset_id].figi for t in trades if t.asset_id in assets]
+            try:
+                prices = await get_last_prices(figis) if figis else {}
+            except Exception:
+                prices = {}
+
             lines = [f"📋 <b>Открытые позиции ({len(trades)})</b>", ""]
             for trade in trades:
                 asset = assets.get(trade.asset_id)
                 ticker = asset.ticker if asset else f"asset#{trade.asset_id}"
+                lot_size = getattr(trade, "lot_size", 1) or 1
+
+                current_price = prices.get(asset.figi, Decimal("0")) if asset else Decimal("0")
+                if current_price > 0:
+                    breakdown = calculate_pnl(
+                        entry_price=trade.entry_price,
+                        exit_price=current_price,
+                        lots=trade.lots,
+                        lot_size=lot_size,
+                    )
+                    net_sign = "+" if breakdown.net_pnl >= 0 else ""
+                    pnl_icon = "🟢" if breakdown.is_profitable else "🔴"
+                    pnl_str = (
+                        f"{pnl_icon} чистый P&L: {net_sign}{breakdown.net_pnl:.2f} ₽  "
+                        f"(сейчас {current_price:.2f} ₽)"
+                    )
+                else:
+                    pnl_str = "цена н/д"
+
                 lines.append(
-                    f"<b>{ticker}</b>  {trade.lots} лот(ов)  "
+                    f"<b>{ticker}</b>  {trade.lots} лот × {lot_size} шт  "
                     f"по {trade.entry_price:.2f} ₽\n"
                     f"  SL: {trade.stop_loss_price:.2f} ₽  "
-                    f"TP: {trade.take_profit_price:.2f} ₽"
+                    f"TP: {trade.take_profit_price:.2f} ₽\n"
+                    f"  {pnl_str}"
                 )
             text = "\n".join(lines)
     except Exception as e:
@@ -377,12 +536,12 @@ async def cb_history(callback: CallbackQuery) -> None:
             for trade in trades:
                 asset = assets.get(trade.asset_id)
                 ticker = asset.ticker if asset else f"asset#{trade.asset_id}"
-                pnl = trade.pnl or Decimal("0")
-                pnl_sign = "+" if pnl >= 0 else ""
+                net_pnl = trade.pnl or Decimal("0")
+                net_sign = "+" if net_pnl >= 0 else ""
                 reason = _REASON_LABEL.get(trade.close_reason or "", "⚪ Закрыта")
                 lines.append(
                     f"{reason}  <b>{ticker}</b>  "
-                    f"<b>{pnl_sign}{pnl:.2f} ₽</b>"
+                    f"чистый P&L: <b>{net_sign}{net_pnl:.2f} ₽</b>"
                 )
             text = "\n".join(lines)
     except Exception as e:
@@ -396,7 +555,7 @@ async def cb_history(callback: CallbackQuery) -> None:
 
 @router.callback_query(lambda c: c.data == "trading:status")
 async def cb_status(callback: CallbackQuery) -> None:
-    """Показать текущие параметры автоторговли и баланс счёта."""
+    """Показать текущие параметры автоторговли, комиссии и баланс счёта."""
     await callback.answer("⏳ Загружаю параметры...")
     cfg = trading_settings
     is_auto = state.is_auto()
@@ -408,17 +567,28 @@ async def cb_status(callback: CallbackQuery) -> None:
     except Exception:
         balance_str = "н/д"
 
+    be = breakeven_pct()
+    # Минимальный TP для выхода в плюс = безубыток + небольшой запас
+    min_tp_needed = be * Decimal("100")
+
     text = (
         "ℹ️ <b>Параметры торговли</b>\n\n"
-        f"💵 Свободно:       <b>{balance_str}</b>\n\n"
-        f"Режим:            <b>{mode_str}</b>\n"
-        f"Уверенность:      <b>≥ {cfg.confidence_threshold * 100:.0f}%</b>\n"
-        f"Лотов на сделку:  <b>{cfg.lots_per_ticker}</b>\n"
-        f"Стоп-лосс:        <b>{cfg.stop_loss_pct * 100:.1f}%</b>\n"
-        f"Тейк-профит:      <b>{cfg.take_profit_pct * 100:.1f}%</b>\n"
-        f"Макс. позиций:    <b>{cfg.max_open_positions}</b>\n"
-        f"Интервал:         <b>{cfg.check_interval_seconds} сек</b>\n\n"
-        "<i>Числовые параметры — в файле .env</i>"
+        f"💵 Свободно:          <b>{balance_str}</b>\n\n"
+        f"Режим:               <b>{mode_str}</b>\n"
+        f"Уверенность:         <b>≥ {cfg.confidence_threshold * 100:.0f}%</b>\n"
+        f"Лотов на сделку:     <b>{cfg.lots_per_ticker}</b>\n"
+        f"Стоп-лосс:           <b>{cfg.stop_loss_pct * 100:.1f}%</b>\n"
+        f"Тейк-профит:         <b>{cfg.take_profit_pct * 100:.1f}%</b>\n"
+        f"Макс. позиций:       <b>{cfg.max_open_positions}</b>\n"
+        f"Интервал:            <b>{cfg.check_interval_seconds} сек</b>\n\n"
+        f"💸 <b>Издержки сделки:</b>\n"
+        f"Комиссия брокера:    <b>{cfg.broker_commission_pct * 100:.2f}%</b> (за каждую сторону)\n"
+        f"НДФЛ на прибыль:     <b>{cfg.tax_pct * 100:.0f}%</b>\n"
+        f"Суммарная комиссия:  <b>{cfg.broker_commission_pct * 2 * 100:.2f}%</b> (туда + обратно)\n\n"
+        f"📈 <b>Точка безубыточности:</b> +{min_tp_needed:.2f}%\n"
+        f"<i>Тейк-профит {cfg.take_profit_pct * 100:.1f}% → "
+        f"{'выше' if cfg.take_profit_pct * 100 > float(min_tp_needed) else '⚠️ ниже'} точки безубытка</i>\n\n"
+        "<i>Параметры меняются в файле .env</i>"
     )
     await callback.message.edit_text(
         text, reply_markup=back_to_trading(), parse_mode="HTML"

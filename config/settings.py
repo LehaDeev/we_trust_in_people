@@ -209,6 +209,10 @@ class TradingSettings(BaseSettings):
     check_interval_seconds: int = Field(3600, alias="TRADING_INTERVAL_SECONDS")
     # Telegram chat_id для уведомлений о сделках (пустая строка = уведомления отключены)
     notification_chat_id: str = Field("", alias="TRADING_CHAT_ID")
+    # Комиссия брокера/биржи за сделку (доля от суммы, 0.003 = 0.3%)
+    broker_commission_pct: float = Field(0.003, alias="TRADING_BROKER_COMMISSION_PCT")
+    # Ставка НДФЛ на прибыль от продажи (0.13 = 13%, 0.15 = 15% при доходе >5 млн)
+    tax_pct: float = Field(0.13, alias="TRADING_TAX_PCT")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
