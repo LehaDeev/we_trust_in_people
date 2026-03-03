@@ -20,23 +20,6 @@ env/
 .venv/
 .env/
 
-# ML — всё приватное, не публиковать
-ml/weights/
-ml/features.py
-ml/labels.py
-ml/dataset.py
-ml/train.py
-ml/predict.py
-ml/tune.py
-scripts/train_model.py
-*.pkl
-*.joblib
-*.h5
-*.pt
-*.pth
-*.ckpt
-*.onnx
-
 # IDE
 .vscode/
 .idea/
@@ -47,6 +30,15 @@ CLAUDE.md
 
 # Внутренние инструменты разработки — не публиковать
 agents/
+
+# ML — бинарные веса моделей (слишком большие для GitHub, >100 MB)
+*.pkl
+*.joblib
+*.h5
+*.pt
+*.pth
+*.ckpt
+*.onnx
 
 # Logs
 logs/
