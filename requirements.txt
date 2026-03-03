@@ -21,6 +21,9 @@ alembic==1.18.4
 # Redis async cache
 redis[asyncio]==5.2.1
 
+# Anthropic SDK (3-agent system: Coder / Reviewer / Architect)
+anthropic>=0.45.0
+
 # Config / Settings
 pydantic==2.10.6
 pydantic-settings==2.7.1

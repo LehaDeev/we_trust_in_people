@@ -167,6 +167,24 @@ class RedisSettings(BaseSettings):
         return f"redis://{self.host}:{self.port}/{self.db}"
 
 
+class AgentSettings(BaseSettings):
+    """
+    Параметры 3-агентной системы (Coder / Reviewer / Architect).
+
+    Требует ANTHROPIC_API_KEY в .env.
+    При пустом api_key агенты поднимают ValueError при первом вызове.
+    """
+
+    # API-ключ Anthropic (обязателен для работы агентов)
+    api_key: str = Field("", alias="ANTHROPIC_API_KEY")
+    # Модель для всех трёх агентов
+    model: str = Field("claude-opus-4-6", alias="AGENT_MODEL")
+    # Максимум раундов ревизии кода (Coder → Reviewer → Coder → ...)
+    max_revision_rounds: int = Field(2, alias="AGENT_MAX_REVISIONS")
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+
 # Синглтоны — импортировать в других модулях
 tinkoff_settings = TinkoffSettings()
 telegram_settings = TelegramSettings()
@@ -175,3 +193,4 @@ data_settings = DataSettings()
 ml_settings = MLSettings()
 app_settings = AppSettings()
 redis_settings = RedisSettings()
+agent_settings = AgentSettings()
