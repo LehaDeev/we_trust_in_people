@@ -116,6 +116,7 @@ def trading_menu(is_auto: bool) -> InlineKeyboardMarkup:
         InlineKeyboardButton(text="📜 История", callback_data="trading:history"),
     )
     builder.row(
+        InlineKeyboardButton(text="📊 Статистика", callback_data="trading:stats"),
         InlineKeyboardButton(text="ℹ️ Параметры", callback_data="trading:status"),
     )
     builder.row(

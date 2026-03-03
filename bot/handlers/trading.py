@@ -553,6 +553,82 @@ async def cb_history(callback: CallbackQuery) -> None:
     )
 
 
+@router.callback_query(lambda c: c.data == "trading:stats")
+async def cb_stats(callback: CallbackQuery) -> None:
+    """Показать агрегированную статистику по всем сделкам."""
+    await callback.answer("⏳ Считаю статистику...")
+
+    try:
+        async with get_session() as session:
+            stats = await trade_repo.get_trade_stats(session)
+    except Exception as e:
+        logger.error("Ошибка получения статистики", error=str(e))
+        await callback.message.edit_text(
+            "❌ Не удалось загрузить статистику.",
+            reply_markup=back_to_trading(),
+            parse_mode="HTML",
+        )
+        return
+
+    total = stats["total_closed"]
+
+    if total == 0:
+        text = (
+            "📊 <b>Статистика</b>\n\n"
+            f"Открытых позиций: <b>{stats['open_count']}</b>\n\n"
+            "<i>Закрытых сделок пока нет.</i>"
+        )
+    else:
+        pnl = stats["total_pnl"]
+        pnl_sign = "+" if pnl >= 0 else ""
+        pnl_icon = "🟢" if pnl >= 0 else "🔴"
+
+        avg = stats["avg_pnl"]
+        avg_sign = "+" if avg >= 0 else ""
+
+        win_rate = stats["win_rate"]
+
+        # Лучшая / худшая сделка
+        best = stats["best"]
+        worst = stats["worst"]
+        best_str = (
+            f"<b>{best['ticker']}</b> +{best['pnl']:.2f} ₽"
+            if best else "—"
+        )
+        worst_str = (
+            f"<b>{worst['ticker']}</b> {worst['pnl']:.2f} ₽"
+            if worst else "—"
+        )
+
+        # Разбивка по причине
+        by_r = stats["by_reason"]
+        sell_n = by_r.get("SELL_SIGNAL", 0)
+        sl_n   = by_r.get("STOP_LOSS",   0)
+        tp_n   = by_r.get("TAKE_PROFIT", 0)
+        man_n  = by_r.get("MANUAL",      0)
+
+        text = (
+            "📊 <b>Статистика торговли</b>\n\n"
+            f"Открытых позиций:  <b>{stats['open_count']}</b>\n"
+            f"Закрытых сделок:   <b>{total}</b> "
+            f"(прибыльных: {stats['wins']}, убыточных: {stats['losses']})\n"
+            f"Win rate:          <b>{win_rate:.1f}%</b>\n\n"
+            f"{pnl_icon} Суммарный P&L:  <b>{pnl_sign}{pnl:.2f} ₽</b>\n"
+            f"Средний P&L:       <b>{avg_sign}{avg:.2f} ₽</b>\n\n"
+            f"🏆 Лучшая сделка:  {best_str}\n"
+            f"💀 Худшая сделка:  {worst_str}\n\n"
+            f"<b>Причины закрытия:</b>\n"
+            f"🔵 По сигналу SELL: {sell_n}\n"
+            f"✅ Тейк-профит:     {tp_n}\n"
+            f"🔴 Стоп-лосс:       {sl_n}\n"
+            + (f"🖐 Ручная:          {man_n}\n" if man_n else "")
+        )
+
+    await callback.message.edit_text(
+        text, reply_markup=back_to_trading(), parse_mode="HTML"
+    )
+
+
 @router.callback_query(lambda c: c.data == "trading:status")
 async def cb_status(callback: CallbackQuery) -> None:
     """Показать текущие параметры автоторговли, комиссии и баланс счёта."""
