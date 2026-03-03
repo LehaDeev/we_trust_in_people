@@ -61,6 +61,32 @@ def back_to_main() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+def portfolio_menu() -> InlineKeyboardMarkup:
+    """
+    Меню портфеля: кнопки перехода в категории активов.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📈 Акции", callback_data="portfolio:shares"),
+        InlineKeyboardButton(text="📄 Облигации", callback_data="portfolio:bonds"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🏦 ETF", callback_data="portfolio:etf"),
+        InlineKeyboardButton(text="💱 Валюта", callback_data="portfolio:currencies"),
+    )
+    builder.row(InlineKeyboardButton(text="◀ Главное меню", callback_data="menu:main"))
+    return builder.as_markup()
+
+
+def back_to_portfolio() -> InlineKeyboardMarkup:
+    """Кнопка возврата в сводку портфеля."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="◀ Портфель", callback_data="menu:portfolio"),
+    )
+    return builder.as_markup()
+
+
 def trading_menu(is_auto: bool) -> InlineKeyboardMarkup:
     """
     Меню раздела автоторговли.
