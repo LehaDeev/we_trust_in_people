@@ -8,11 +8,14 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 
 def main_menu() -> InlineKeyboardMarkup:
-    """Главное меню: сигналы и портфель."""
+    """Главное меню: сигналы, портфель, автоторговля."""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text="📊 Сигналы", callback_data="menu:signals"),
         InlineKeyboardButton(text="💼 Портфель", callback_data="menu:portfolio"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="🤖 Торговля", callback_data="menu:trading"),
     )
     return builder.as_markup()
 
@@ -55,4 +58,29 @@ def back_to_main() -> InlineKeyboardMarkup:
     """Кнопка возврата в главное меню."""
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text="◀ Главное меню", callback_data="menu:main"))
+    return builder.as_markup()
+
+
+def trading_menu() -> InlineKeyboardMarkup:
+    """Меню раздела автоторговли."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="📋 Позиции", callback_data="trading:positions"),
+        InlineKeyboardButton(text="📜 История", callback_data="trading:history"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="ℹ️ Параметры", callback_data="trading:status"),
+    )
+    builder.row(
+        InlineKeyboardButton(text="◀ Главное меню", callback_data="menu:main"),
+    )
+    return builder.as_markup()
+
+
+def back_to_trading() -> InlineKeyboardMarkup:
+    """Кнопка возврата в меню торговли."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text="◀ Назад", callback_data="menu:trading"),
+    )
     return builder.as_markup()
