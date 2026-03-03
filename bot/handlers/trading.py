@@ -51,9 +51,14 @@ def _mode_text(is_auto: bool) -> str:
 
 
 async def _show_trading_menu(callback: CallbackQuery) -> None:
-    """Вспомогательная функция: отрисовать меню торговли."""
+    """Вспомогательная функция: отрисовать меню торговли с балансом."""
     is_auto = state.is_auto()
-    text = f"🤖 <b>Торговля</b>\n\n{_mode_text(is_auto)}"
+    try:
+        balance = await get_rub_balance()
+        balance_str = f"💵 Свободно: <b>{balance:.2f} ₽</b>"
+    except Exception:
+        balance_str = "💵 Свободно: <i>н/д</i>"
+    text = f"🤖 <b>Торговля</b>\n\n{_mode_text(is_auto)}\n\n{balance_str}"
     await callback.message.edit_text(
         text, reply_markup=trading_menu(is_auto), parse_mode="HTML"
     )
@@ -391,12 +396,21 @@ async def cb_history(callback: CallbackQuery) -> None:
 
 @router.callback_query(lambda c: c.data == "trading:status")
 async def cb_status(callback: CallbackQuery) -> None:
-    """Показать текущие параметры автоторговли из .env."""
+    """Показать текущие параметры автоторговли и баланс счёта."""
+    await callback.answer("⏳ Загружаю параметры...")
     cfg = trading_settings
     is_auto = state.is_auto()
     mode_str = "Авто" if is_auto else "Ручной"
+
+    try:
+        balance = await get_rub_balance()
+        balance_str = f"{balance:.2f} ₽"
+    except Exception:
+        balance_str = "н/д"
+
     text = (
         "ℹ️ <b>Параметры торговли</b>\n\n"
+        f"💵 Свободно:       <b>{balance_str}</b>\n\n"
         f"Режим:            <b>{mode_str}</b>\n"
         f"Уверенность:      <b>≥ {cfg.confidence_threshold * 100:.0f}%</b>\n"
         f"Лотов на сделку:  <b>{cfg.lots_per_ticker}</b>\n"
@@ -409,4 +423,3 @@ async def cb_status(callback: CallbackQuery) -> None:
     await callback.message.edit_text(
         text, reply_markup=back_to_trading(), parse_mode="HTML"
     )
-    await callback.answer()

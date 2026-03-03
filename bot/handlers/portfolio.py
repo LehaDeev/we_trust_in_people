@@ -1,13 +1,14 @@
 """
 Хендлер портфеля: текущие позиции и P&L из Tinkoff Invest API.
 """
+import asyncio
 from decimal import Decimal
 
 from aiogram import Router
 from aiogram.types import CallbackQuery
 
 from bot.keyboards import back_to_main
-from tinkoff.portfolio import get_portfolio_summary
+from tinkoff.portfolio import get_portfolio_summary, get_rub_balance
 from utils.logger import logger
 
 router = Router(name="portfolio")
@@ -20,29 +21,23 @@ def _fmt(value: Decimal | None) -> str:
     return f"{value:,.2f}"
 
 
-def _format_portfolio(summary: dict) -> str:
+def _format_portfolio(summary: dict, rub_balance: Decimal) -> str:
     """
     Форматировать сводку портфеля в читаемый текст.
 
-    Пример:
-        💼 Портфель
-
-        Акции:    150 000.00 ₽
-        Облигации: 0.00 ₽
-        ETF:       0.00 ₽
-        Валюта:   5 000.00 ₽
-
-        📌 Позиции:
-        SBER  10 шт.  325.50 ₽  P&L: +1 250.00
-        GAZP   5 шт.  185.20 ₽  P&L: -300.00
+    Аргументы:
+        summary:     результат get_portfolio_summary()
+        rub_balance: свободный рублёвый остаток из get_rub_balance()
     """
     lines = [
         "💼 <b>Портфель</b>",
         "",
-        f"Акции:      <b>{_fmt(summary.get('total_shares'))} ₽</b>",
-        f"Облигации:  <b>{_fmt(summary.get('total_bonds'))} ₽</b>",
-        f"ETF:        <b>{_fmt(summary.get('total_etf'))} ₽</b>",
-        f"Валюта:     <b>{_fmt(summary.get('total_currencies'))} ₽</b>",
+        f"💵 Свободно:   <b>{_fmt(rub_balance)} ₽</b>",
+        "",
+        f"Акции:        <b>{_fmt(summary.get('total_shares'))} ₽</b>",
+        f"Облигации:    <b>{_fmt(summary.get('total_bonds'))} ₽</b>",
+        f"ETF:          <b>{_fmt(summary.get('total_etf'))} ₽</b>",
+        f"Валюта:       <b>{_fmt(summary.get('total_currencies'))} ₽</b>",
     ]
 
     positions: list[dict] = summary.get("positions", [])
@@ -68,11 +63,14 @@ def _format_portfolio(summary: dict) -> str:
 
 @router.callback_query(lambda c: c.data == "menu:portfolio")
 async def cb_portfolio(callback: CallbackQuery) -> None:
-    """Показать текущий портфель."""
+    """Показать текущий портфель и свободный баланс."""
     await callback.answer("⏳ Загружаю портфель...")
     try:
-        summary = await get_portfolio_summary()
-        text = _format_portfolio(summary)
+        summary, rub_balance = await asyncio.gather(
+            get_portfolio_summary(),
+            get_rub_balance(),
+        )
+        text = _format_portfolio(summary, rub_balance)
     except Exception as e:
         logger.error("Portfolio fetch error", error=str(e))
         text = "❌ Не удалось получить данные портфеля.\nПроверьте подключение к Tinkoff API."
