@@ -61,9 +61,30 @@ def back_to_main() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def trading_menu() -> InlineKeyboardMarkup:
-    """Меню раздела автоторговли."""
+def trading_menu(is_auto: bool) -> InlineKeyboardMarkup:
+    """
+    Меню раздела автоторговли.
+
+    Аргументы:
+        is_auto: True если сейчас включён авто-режим.
+    """
     builder = InlineKeyboardBuilder()
+    # Кнопка переключения режима
+    if is_auto:
+        toggle_btn = InlineKeyboardButton(
+            text="⏸ Переключить на ручной", callback_data="trading:toggle"
+        )
+    else:
+        toggle_btn = InlineKeyboardButton(
+            text="▶ Переключить на авто", callback_data="trading:toggle"
+        )
+    builder.row(toggle_btn)
+    # В ручном режиме — кнопки ручной торговли
+    if not is_auto:
+        builder.row(
+            InlineKeyboardButton(text="🛒 Купить", callback_data="trading:buy"),
+            InlineKeyboardButton(text="💸 Продать", callback_data="trading:sell"),
+        )
     builder.row(
         InlineKeyboardButton(text="📋 Позиции", callback_data="trading:positions"),
         InlineKeyboardButton(text="📜 История", callback_data="trading:history"),
@@ -74,6 +95,45 @@ def trading_menu() -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text="◀ Главное меню", callback_data="menu:main"),
     )
+    return builder.as_markup()
+
+
+def manual_buy_tickers(tickers: list[str]) -> InlineKeyboardMarkup:
+    """
+    Список тикеров для ручной покупки.
+
+    Аргументы:
+        tickers: список тикеров из data_settings.
+    """
+    builder = InlineKeyboardBuilder()
+    buttons = [
+        InlineKeyboardButton(text=ticker, callback_data=f"trading:buy:{ticker}")
+        for ticker in tickers
+    ]
+    builder.add(*buttons)
+    builder.adjust(3)
+    builder.row(InlineKeyboardButton(text="◀ Назад", callback_data="menu:trading"))
+    return builder.as_markup()
+
+
+def manual_sell_positions(
+    positions: list[tuple[int, str, str]],
+) -> InlineKeyboardMarkup:
+    """
+    Список открытых позиций для ручной продажи.
+
+    Аргументы:
+        positions: список кортежей (trade_id, ticker, entry_price_str).
+    """
+    builder = InlineKeyboardBuilder()
+    for trade_id, ticker, price_str in positions:
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{ticker}  {price_str} ₽",
+                callback_data=f"trading:sell:{trade_id}",
+            )
+        )
+    builder.row(InlineKeyboardButton(text="◀ Назад", callback_data="menu:trading"))
     return builder.as_markup()
 
 

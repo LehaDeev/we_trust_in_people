@@ -26,6 +26,7 @@ from db.models import Asset, Trade
 from db import trade_repo
 from ml.predict import predict_all
 from tinkoff.market_data import get_last_prices
+from trading import state
 from trading.executor import TradeExecutor
 from trading.notifier import notify_close, notify_open
 from utils.logger import logger
@@ -67,8 +68,8 @@ class TradingScheduler:
 
         Открывает и закрывает позиции в рамках одной транзакции.
         """
-        if not trading_settings.enabled:
-            logger.info("Автоторговля отключена (TRADING_ENABLED=false) — тик пропущен")
+        if not state.is_auto():
+            logger.info("Автоторговля в ручном режиме — тик пропущен")
             return
 
         logger.info("Начало тика автоторговли")

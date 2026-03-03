@@ -103,11 +103,13 @@ async def notify_close(
         "STOP_LOSS": "🔴",
         "TAKE_PROFIT": "✅",
         "SELL_SIGNAL": "🔵",
+        "MANUAL": "🖐",
     }
     reason_label = {
         "STOP_LOSS": "Стоп-лосс",
         "TAKE_PROFIT": "Тейк-профит",
         "SELL_SIGNAL": "Сигнал SELL",
+        "MANUAL": "Ручная продажа",
     }
 
     emoji = emoji_map.get(reason, "⚪")
