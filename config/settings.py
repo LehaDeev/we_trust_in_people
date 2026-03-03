@@ -185,6 +185,34 @@ class AgentSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
+class TradingSettings(BaseSettings):
+    """
+    Параметры автоматической торговли.
+
+    По умолчанию TRADING_ENABLED=false — торговля выключена для безопасности.
+    Включить только после проверки всех параметров в .env.
+    """
+
+    # Главный выключатель автоторговли (false = только логируем, не торгуем)
+    enabled: bool = Field(False, alias="TRADING_ENABLED")
+    # Минимальная уверенность модели для открытия позиции (0.0 - 1.0)
+    confidence_threshold: float = Field(0.65, alias="TRADING_CONFIDENCE_THRESHOLD")
+    # Количество лотов на каждую сделку
+    lots_per_ticker: int = Field(1, alias="TRADING_LOTS_PER_TICKER")
+    # Стоп-лосс: закрыть позицию при убытке (доля от цены входа, 0.03 = 3%)
+    stop_loss_pct: float = Field(0.03, alias="TRADING_STOP_LOSS_PCT")
+    # Тейк-профит: закрыть позицию при прибыли (доля от цены входа, 0.05 = 5%)
+    take_profit_pct: float = Field(0.05, alias="TRADING_TAKE_PROFIT_PCT")
+    # Максимальное количество одновременно открытых позиций
+    max_open_positions: int = Field(5, alias="TRADING_MAX_POSITIONS")
+    # Интервал проверки сигналов и открытых позиций (секунды, 3600 = 1 час)
+    check_interval_seconds: int = Field(3600, alias="TRADING_INTERVAL_SECONDS")
+    # Telegram chat_id для уведомлений о сделках (пустая строка = уведомления отключены)
+    notification_chat_id: str = Field("", alias="TRADING_CHAT_ID")
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+
 # Синглтоны — импортировать в других модулях
 tinkoff_settings = TinkoffSettings()
 telegram_settings = TelegramSettings()
@@ -194,3 +222,4 @@ ml_settings = MLSettings()
 app_settings = AppSettings()
 redis_settings = RedisSettings()
 agent_settings = AgentSettings()
+trading_settings = TradingSettings()

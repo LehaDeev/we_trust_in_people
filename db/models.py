@@ -5,7 +5,7 @@ Add new models here as the project grows.
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, ForeignKey, Numeric, String, UniqueConstraint, func
+from sqlalchemy import DateTime, ForeignKey, Index, Numeric, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from db.database import Base
@@ -26,6 +26,7 @@ class Asset(Base):
 
     candles: Mapped[list["Candle"]] = relationship(back_populates="asset")
     signals: Mapped[list["Signal"]] = relationship(back_populates="asset")
+    trades: Mapped[list["Trade"]] = relationship(back_populates="asset")
 
 
 class Candle(Base):
@@ -63,3 +64,38 @@ class Signal(Base):
     price_at_signal: Mapped[Decimal] = mapped_column(Numeric(18, 6))
 
     asset: Mapped["Asset"] = relationship(back_populates="signals")
+
+
+class Trade(Base):
+    """Сделка автоторговца: открытая или закрытая позиция."""
+    __tablename__ = "trades"
+    __table_args__ = (
+        Index("ix_trades_asset_status", "asset_id", "status"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    asset_id: Mapped[int] = mapped_column(ForeignKey("assets.id"), index=True)
+    # ID заявки в Tinkoff (None если ордер не был выставлен)
+    order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    lots: Mapped[int]
+    # Цена открытия позиции (цена исполнения ордера)
+    entry_price: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    # Цена закрытия (None пока позиция открыта)
+    exit_price: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    # Рассчитанные уровни стоп-лосса и тейк-профита
+    stop_loss_price: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    take_profit_price: Mapped[Decimal] = mapped_column(Numeric(18, 6))
+    # Статус: "OPEN" или "CLOSED"
+    status: Mapped[str] = mapped_column(String(10), index=True, default="OPEN")
+    # Причина закрытия: "SELL_SIGNAL" | "STOP_LOSS" | "TAKE_PROFIT" | None
+    close_reason: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    # PnL в рублях (None пока позиция открыта)
+    pnl: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    asset: Mapped["Asset"] = relationship(back_populates="trades")
