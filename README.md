@@ -43,9 +43,8 @@ cd we_trust_in_people
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 
-# 3. Установить зависимости
-pip install -r requirements.txt \
-    --extra-index-url https://opensource.tbank.ru/api/v4/projects/238/packages/pypi/simple
+# 3. Установить зависимости (URL реестра TBank уже прописан в requirements.txt)
+pip install -r requirements.txt
 
 # 4. Настроить переменные окружения
 cp .env.example .env
