@@ -62,13 +62,13 @@ def _format_overview(summary: dict, rub_balance: Decimal) -> str:
     total_etf = summary.get("total_etf")
     total_currencies = summary.get("total_currencies")
 
-    # Считаем общую стоимость (без свободного кеша)
+    # Tinkoff API: total_currencies уже включает свободный рублёвый остаток,
+    # поэтому grand_total = сумма по категориям (без дополнительного rub_balance).
     totals = [
         v for v in (total_shares, total_bonds, total_etf, total_currencies)
         if v is not None
     ]
-    total_assets = sum(totals, Decimal("0"))
-    grand_total = total_assets + rub_balance
+    grand_total = sum(totals, Decimal("0"))
 
     lines = [
         "💼 <b>Портфель</b>",
