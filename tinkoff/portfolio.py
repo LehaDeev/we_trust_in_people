@@ -65,6 +65,23 @@ async def get_positions() -> PositionsResponse:
     return positions
 
 
+async def get_rub_balance() -> Decimal:
+    """
+    Получить доступный остаток средств в рублях.
+
+    Использует get_positions() — не кешируется, всегда актуальный баланс.
+
+    Возвращает:
+        Остаток в рублях или Decimal("0") если рублёвого остатка нет.
+    """
+    positions = await get_positions()
+    for money in positions.money:
+        if getattr(money, "currency", "").lower() == "rub":
+            return money_to_decimal(money)
+    logger.warning("RUB balance not found in positions")
+    return Decimal("0")
+
+
 async def get_portfolio_summary() -> dict:
     """
     Краткая сводка по портфелю в удобном формате.

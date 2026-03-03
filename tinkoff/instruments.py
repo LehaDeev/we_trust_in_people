@@ -21,6 +21,7 @@ class InstrumentInfo:
     currency: str
     instrument_type: str  # "share", "etf", "bond"
     class_code: str = field(default="")
+    lot: int = field(default=1)  # количество бумаг в 1 лоте
 
 
 async def find_instrument(query: str) -> list[InstrumentInfo]:
@@ -46,6 +47,7 @@ async def find_instrument(query: str) -> list[InstrumentInfo]:
             currency="RUB",  # InstrumentShort не содержит currency
             instrument_type=str(item.instrument_type),
             class_code=getattr(item, "class_code", ""),
+            lot=getattr(item, "lot", 1),
         ))
 
     logger.debug("Instruments found", query=query, count=len(result))

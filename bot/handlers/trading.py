@@ -23,7 +23,9 @@ from config.settings import data_settings, trading_settings
 from db.database import get_session
 from db import trade_repo
 from db.models import Asset, Trade
+from tinkoff.instruments import get_instrument_by_ticker
 from tinkoff.market_data import get_last_price
+from tinkoff.portfolio import get_rub_balance
 from trading import state
 from trading.executor import TradeExecutor
 from trading.notifier import notify_close, notify_open
@@ -124,6 +126,22 @@ async def cb_buy_execute(callback: CallbackQuery) -> None:
             if current_price <= 0:
                 await callback.message.edit_text(
                     f"❌ Не удалось получить цену для <b>{ticker}</b>.",
+                    reply_markup=back_to_trading(),
+                    parse_mode="HTML",
+                )
+                return
+
+            # Получить размер лота и проверить баланс
+            instrument_info = await get_instrument_by_ticker(ticker)
+            lot_size = instrument_info.lot if instrument_info else 1
+            needed = current_price * trading_settings.lots_per_ticker * lot_size
+            balance = await get_rub_balance()
+            if balance < needed:
+                await callback.message.edit_text(
+                    f"⚠️ <b>Недостаточно средств для покупки {ticker}</b>\n\n"
+                    f"Нужно:    <b>{needed:.2f} ₽</b>  "
+                    f"({trading_settings.lots_per_ticker} лот × {lot_size} шт × {current_price:.2f} ₽)\n"
+                    f"Доступно: <b>{balance:.2f} ₽</b>",
                     reply_markup=back_to_trading(),
                     parse_mode="HTML",
                 )
