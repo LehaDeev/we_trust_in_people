@@ -170,8 +170,8 @@ we_trust_in_people/
 | `TRADING_ENABLED` | Включить автоторговлю | `false` |
 | `TRADING_CONFIDENCE_THRESHOLD` | Мин. уверенность модели для BUY | `0.65` |
 | `TRADING_LOTS_PER_TICKER` | Лотов на каждую сделку | `1` |
-| `TRADING_STOP_LOSS_PCT` | Стоп-лосс (% от цены входа) | `0.03` |
-| `TRADING_TAKE_PROFIT_PCT` | Тейк-профит (% от цены входа) | `0.05` |
+| `TRADING_STOP_LOSS_PCT` | Целевой чистый убыток для стоп-лосса (после комиссий) | `0.03` |
+| `TRADING_TAKE_PROFIT_PCT` | Целевая чистая прибыль для тейк-профита (после комиссий и НДФЛ) | `0.05` |
 | `TRADING_MAX_POSITIONS` | Макс. одновременных позиций | `5` |
 | `TRADING_INTERVAL_SECONDS` | Интервал проверки сигналов (сек) | `3600` |
 | `TRADING_CHAT_ID` | Telegram chat_id для уведомлений | — |
@@ -235,9 +235,14 @@ gross_pnl    = exit_total - entry_total
 комиссии     = entry_total × commission_pct + exit_total × commission_pct
 НДФЛ         = max(0, (gross_pnl - комиссии) × tax_pct)
 net_pnl      = gross_pnl - комиссии - НДФЛ
+```
 
-Безубыток    = 2 × commission_pct / (1 - commission_pct)
-               ≈ 0.60% при комиссии 0.3%
+`TRADING_STOP_LOSS_PCT` и `TRADING_TAKE_PROFIT_PCT` задаются как **целевой чистый** результат.
+Бот сам пересчитывает нужный gross-уровень цены. Пример при комиссии 0.3% и НДФЛ 13%:
+
+```
+TP = 1% чистых → цена должна вырасти на +1.75% (gross)
+SL = 10% чистых → цена должна упасть на −9.42% (gross)
 ```
 
 ### FIFO

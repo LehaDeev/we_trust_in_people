@@ -33,6 +33,8 @@ from trading import state
 from trading.executor import TradeExecutor
 from trading.notifier import notify_close, notify_open
 from trading.profitability import (
+    adjusted_sl_price,
+    adjusted_tp_price,
     breakeven_pct,
     calculate_pnl,
     format_pnl_breakdown,
@@ -746,27 +748,26 @@ async def cb_status(callback: CallbackQuery) -> None:
     except Exception:
         balance_str = "н/д"
 
-    be = breakeven_pct()
-    # Минимальный TP для выхода в плюс = безубыток + небольшой запас
-    min_tp_needed = be * Decimal("100")
+    # Фактическое изменение цены при срабатывании SL/TP (gross, в % от цены входа)
+    entry_ref = Decimal("1")
+    tp_gross_pct = (adjusted_tp_price(entry_ref, cfg.take_profit_pct) - 1) * 100
+    sl_gross_pct = (1 - adjusted_sl_price(entry_ref, cfg.stop_loss_pct)) * 100
 
     text = (
         "ℹ️ <b>Параметры торговли</b>\n\n"
-        f"💵 Свободно:          <b>{balance_str}</b>\n\n"
-        f"Режим:               <b>{mode_str}</b>\n"
-        f"Уверенность:         <b>≥ {cfg.confidence_threshold * 100:.0f}%</b>\n"
-        f"Лотов на сделку:     <b>{cfg.lots_per_ticker}</b>\n"
-        f"Стоп-лосс:           <b>{cfg.stop_loss_pct * 100:.1f}%</b>\n"
-        f"Тейк-профит:         <b>{cfg.take_profit_pct * 100:.1f}%</b>\n"
-        f"Макс. позиций:       <b>{cfg.max_open_positions}</b>\n"
-        f"Интервал:            <b>{cfg.check_interval_seconds} сек</b>\n\n"
-        f"💸 <b>Издержки сделки:</b>\n"
-        f"Комиссия брокера:    <b>{cfg.broker_commission_pct * 100:.2f}%</b> (за каждую сторону)\n"
-        f"НДФЛ на прибыль:     <b>{cfg.tax_pct * 100:.0f}%</b>\n"
-        f"Суммарная комиссия:  <b>{cfg.broker_commission_pct * 2 * 100:.2f}%</b> (туда + обратно)\n\n"
-        f"📈 <b>Точка безубыточности:</b> +{min_tp_needed:.2f}%\n"
-        f"<i>Тейк-профит {cfg.take_profit_pct * 100:.1f}% → "
-        f"{'выше' if cfg.take_profit_pct * 100 > float(min_tp_needed) else '⚠️ ниже'} точки безубытка</i>\n\n"
+        f"💵 Свободно:       <b>{balance_str}</b>\n\n"
+        f"Режим:             <b>{mode_str}</b>\n"
+        f"Уверенность:       <b>≥ {cfg.confidence_threshold * 100:.0f}%</b>\n"
+        f"Лотов на сделку:   <b>{cfg.lots_per_ticker}</b>\n"
+        f"Макс. позиций:     <b>{cfg.max_open_positions}</b>\n"
+        f"Интервал:          <b>{cfg.check_interval_seconds} сек</b>\n\n"
+        f"💸 <b>Комиссии:</b>\n"
+        f"Брокер:  <b>{cfg.broker_commission_pct * 100:.2f}%</b> за покупку + "
+        f"<b>{cfg.broker_commission_pct * 100:.2f}%</b> за продажу\n"
+        f"НДФЛ:    <b>{cfg.tax_pct * 100:.0f}%</b> от чистой прибыли\n\n"
+        f"📊 <b>Уровни закрытия позиции:</b>\n"
+        f"Стоп-лосс:    цена падает на <b>−{sl_gross_pct:.2f}%</b> → чистый убыток <b>−{cfg.stop_loss_pct * 100:.1f}%</b>\n"
+        f"Тейк-профит:  цена растёт на  <b>+{tp_gross_pct:.2f}%</b> → чистая прибыль <b>+{cfg.take_profit_pct * 100:.1f}%</b>\n\n"
         "<i>Параметры меняются в файле .env</i>"
     )
     await callback.message.edit_text(
