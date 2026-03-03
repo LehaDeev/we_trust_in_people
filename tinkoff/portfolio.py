@@ -82,6 +82,30 @@ async def get_rub_balance() -> Decimal:
     return Decimal("0")
 
 
+_POSITION_DECIMAL_FIELDS = ("quantity", "current_price", "current_nkd",
+                             "average_buy_price", "expected_yield")
+_SUMMARY_DECIMAL_FIELDS = ("total_shares", "total_bonds", "total_etf", "total_currencies")
+
+
+def _ensure_decimals(summary: dict) -> dict:
+    """
+    Привести все числовые поля словаря портфеля к типу Decimal.
+
+    Нужно для обратной совместимости: старый кеш Redis хранил Decimal как строки,
+    новый — как float. Оба варианта корректно конвертируются через Decimal(str(v)).
+    """
+    for field in _SUMMARY_DECIMAL_FIELDS:
+        v = summary.get(field)
+        if v is not None:
+            summary[field] = Decimal(str(v))
+    for pos in summary.get("positions", []):
+        for field in _POSITION_DECIMAL_FIELDS:
+            v = pos.get(field)
+            if v is not None:
+                pos[field] = Decimal(str(v))
+    return summary
+
+
 async def get_portfolio_summary() -> dict:
     """
     Краткая сводка по портфелю в удобном формате.
@@ -100,7 +124,8 @@ async def get_portfolio_summary() -> dict:
             cached = await redis.get(cache_key)
             if cached:
                 logger.debug("Portfolio cache hit", key=cache_key)
-                return json.loads(cached, parse_float=lambda x: Decimal(x))
+                data = json.loads(cached, parse_float=lambda x: Decimal(x))
+                return _ensure_decimals(data)
         except Exception as e:
             logger.warning("Redis get error", key=cache_key, error=str(e))
 
@@ -127,13 +152,16 @@ async def get_portfolio_summary() -> dict:
         "positions": positions,
     }
 
-    # ── Redis: сохраняем в кеш (Decimal сериализуем как строку) ──────────────
+    # ── Redis: сохраняем в кеш (Decimal → float, чтобы parse_float при чтении работал) ──
     if redis is not None:
         try:
             await redis.setex(
                 cache_key,
                 redis_settings.portfolio_ttl,
-                json.dumps(summary, default=str),
+                json.dumps(
+                    summary,
+                    default=lambda v: float(v) if isinstance(v, Decimal) else str(v),
+                ),
             )
             logger.debug("Portfolio cached", ttl=redis_settings.portfolio_ttl)
         except Exception as e:
