@@ -1,6 +1,11 @@
 """
 Получение рыночных данных через Tinkoff Invest API.
 Свечи, текущие цены, стакан.
+
+Кеширование:
+    get_last_prices() кешируется в Redis на REDIS_PRICE_TTL секунд (per instrument).
+    Батч-запрос делается только для instrument_id, которых нет в кеше.
+    При недоступном Redis — прямой вызов API (graceful degradation).
 """
 import asyncio
 from datetime import datetime, timezone
@@ -15,8 +20,10 @@ from t_tech.invest.schemas import (
 )
 from t_tech.invest.utils import quotation_to_decimal
 
+from config.settings import redis_settings
 from tinkoff.client import get_client
 from utils.logger import logger
+from utils.redis_cache import get_redis
 
 
 # Удобные алиасы для часто используемых интервалов
@@ -102,21 +109,62 @@ async def get_last_prices(instrument_ids: list[str]) -> dict[str, Decimal]:
     """
     Получить текущие цены последней сделки для списка инструментов.
 
+    Каждая цена кешируется в Redis отдельно (ключ: last_price:{instrument_id})
+    на REDIS_PRICE_TTL секунд. API вызывается только для instrument_id без кеша.
+    При недоступном Redis — прямой вызов API (graceful degradation).
+
     Args:
         instrument_ids: список FIGI или UID инструментов
 
     Returns:
         Словарь {instrument_id: цена}
     """
-    async with get_client() as client:
-        response = await client.market_data.get_last_prices(
-            instrument_id=instrument_ids,
-        )
-    prices = {
-        p.instrument_uid: quotation_to_decimal(p.price)
-        for p in response.last_prices
-    }
-    logger.debug("Last prices fetched", count=len(prices))
+    prices: dict[str, Decimal] = {}
+    missing: list[str] = []
+
+    # ── Redis: проверяем кеш для каждого instrument_id отдельно ─────────────
+    redis = await get_redis()
+    if redis is not None:
+        for uid in instrument_ids:
+            try:
+                cached = await redis.get(f"last_price:{uid}")
+                if cached is not None:
+                    prices[uid] = Decimal(cached)
+                else:
+                    missing.append(uid)
+            except Exception as e:
+                logger.warning("Redis get error", key=f"last_price:{uid}", error=str(e))
+                missing.append(uid)
+    else:
+        missing = list(instrument_ids)
+
+    # ── API: запрашиваем только те, которых нет в кеше ──────────────────────
+    if missing:
+        async with get_client() as client:
+            response = await client.market_data.get_last_prices(
+                instrument_id=missing,
+            )
+        fresh = {
+            p.instrument_uid: quotation_to_decimal(p.price)
+            for p in response.last_prices
+        }
+        prices.update(fresh)
+
+        # ── Redis: сохраняем новые цены ──────────────────────────────────────
+        if redis is not None:
+            for uid, price in fresh.items():
+                try:
+                    await redis.setex(
+                        f"last_price:{uid}",
+                        redis_settings.price_ttl,
+                        str(price),
+                    )
+                except Exception as e:
+                    logger.warning("Redis setex error", key=f"last_price:{uid}", error=str(e))
+
+        logger.debug("Last prices fetched from API", count=len(fresh))
+
+    logger.debug("Last prices total", total=len(prices), from_cache=len(instrument_ids) - len(missing))
     return prices
 
 

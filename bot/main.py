@@ -14,13 +14,15 @@ from bot.handlers import portfolio, signals, start
 from config.settings import telegram_settings
 from db.database import close_db, init_db
 from utils.logger import logger
+from utils.redis_cache import close_redis, init_redis
 
 
 async def main() -> None:
-    """Инициализировать БД, запустить бота, закрыть соединение при завершении."""
+    """Инициализировать БД, Redis, запустить бота, закрыть соединения при завершении."""
     logger.info("Запуск Telegram-бота...")
 
     await init_db()
+    await init_redis()
 
     bot = Bot(
         token=telegram_settings.bot_token,
@@ -36,6 +38,7 @@ async def main() -> None:
     try:
         await dp.start_polling(bot)
     finally:
+        await close_redis()
         await close_db()
         await bot.session.close()
         logger.info("Бот остановлен.")

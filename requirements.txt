@@ -18,6 +18,9 @@ SQLAlchemy[asyncio]==2.0.47
 # DB migrations
 alembic==1.18.4
 
+# Redis async cache
+redis[asyncio]==5.2.1
+
 # Config / Settings
 pydantic==2.10.6
 pydantic-settings==2.7.1

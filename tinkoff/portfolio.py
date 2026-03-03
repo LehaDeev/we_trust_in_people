@@ -5,7 +5,12 @@
 Лимиты API (актуально с февраля 2025):
     - PostOrder:      15 заявок/сек — ограничен через rate_limiter.post_order_limiter
     - PostOrderAsync: без ограничений данным лимитом
+
+Кеширование:
+    get_portfolio_summary() кешируется в Redis на REDIS_PORTFOLIO_TTL секунд.
+    При недоступном Redis — прямой вызов Tinkoff API (graceful degradation).
 """
+import json
 from decimal import Decimal
 
 from t_tech.invest.schemas import (
@@ -18,10 +23,11 @@ from t_tech.invest.schemas import (
 )
 from t_tech.invest.utils import money_to_decimal, quotation_to_decimal
 
-from config.settings import tinkoff_settings
+from config.settings import redis_settings, tinkoff_settings
 from tinkoff.client import get_client
 from tinkoff.rate_limiter import post_order_limiter
 from utils.logger import logger
+from utils.redis_cache import get_redis
 
 ACCOUNT_ID = tinkoff_settings.account_id
 
@@ -63,9 +69,25 @@ async def get_portfolio_summary() -> dict:
     """
     Краткая сводка по портфелю в удобном формате.
 
+    Результат кешируется в Redis на REDIS_PORTFOLIO_TTL секунд.
+    При недоступном Redis — прямой вызов Tinkoff API (graceful degradation).
+
     Возвращает:
         Словарь с суммами по типам активов и списком позиций
     """
+    # ── Redis: проверяем кеш ─────────────────────────────────────────────────
+    cache_key = f"portfolio:{ACCOUNT_ID}"
+    redis = await get_redis()
+    if redis is not None:
+        try:
+            cached = await redis.get(cache_key)
+            if cached:
+                logger.debug("Portfolio cache hit", key=cache_key)
+                return json.loads(cached, parse_float=lambda x: Decimal(x))
+        except Exception as e:
+            logger.warning("Redis get error", key=cache_key, error=str(e))
+
+    # ── Запрос к Tinkoff API ─────────────────────────────────────────────────
     portfolio = await get_portfolio()
 
     positions = []
@@ -80,13 +102,27 @@ async def get_portfolio_summary() -> dict:
             "expected_yield": money_to_decimal(pos.expected_yield),
         })
 
-    return {
+    summary = {
         "total_shares": money_to_decimal(portfolio.total_amount_shares),
         "total_bonds": money_to_decimal(portfolio.total_amount_bonds),
         "total_etf": money_to_decimal(portfolio.total_amount_etf),
         "total_currencies": money_to_decimal(portfolio.total_amount_currencies),
         "positions": positions,
     }
+
+    # ── Redis: сохраняем в кеш (Decimal сериализуем как строку) ──────────────
+    if redis is not None:
+        try:
+            await redis.setex(
+                cache_key,
+                redis_settings.portfolio_ttl,
+                json.dumps(summary, default=str),
+            )
+            logger.debug("Portfolio cached", ttl=redis_settings.portfolio_ttl)
+        except Exception as e:
+            logger.warning("Redis setex error", key=cache_key, error=str(e))
+
+    return summary
 
 
 async def post_market_order(

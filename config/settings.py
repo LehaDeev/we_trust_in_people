@@ -138,6 +138,35 @@ class AppSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
+class RedisSettings(BaseSettings):
+    """
+    Параметры Redis-кеша.
+
+    Все TTL в секундах. При REDIS_PASSWORD="" — подключение без аутентификации.
+    """
+
+    host: str = Field("localhost", alias="REDIS_HOST")
+    port: int = Field(6379, alias="REDIS_PORT")
+    db: int = Field(0, alias="REDIS_DB")
+    # Пустая строка = без пароля (Redis по умолчанию без auth)
+    password: str = Field("", alias="REDIS_PASSWORD")
+
+    # TTL кешей (секунды)
+    signal_ttl: int = Field(60, alias="REDIS_SIGNAL_TTL")        # сигнал BUY/SELL/HOLD
+    candles_ttl: int = Field(300, alias="REDIS_CANDLES_TTL")     # свечи из БД
+    portfolio_ttl: int = Field(60, alias="REDIS_PORTFOLIO_TTL")  # портфель из Tinkoff API
+    price_ttl: int = Field(30, alias="REDIS_PRICE_TTL")          # последние цены
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+    @property
+    def url(self) -> str:
+        """Redis URL для подключения через redis.asyncio.from_url()."""
+        if self.password:
+            return f"redis://:{self.password}@{self.host}:{self.port}/{self.db}"
+        return f"redis://{self.host}:{self.port}/{self.db}"
+
+
 # Синглтоны — импортировать в других модулях
 tinkoff_settings = TinkoffSettings()
 telegram_settings = TelegramSettings()
@@ -145,3 +174,4 @@ postgres_settings = PostgresSettings()
 data_settings = DataSettings()
 ml_settings = MLSettings()
 app_settings = AppSettings()
+redis_settings = RedisSettings()
