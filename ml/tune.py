@@ -19,6 +19,8 @@ import xgboost as xgb
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.metrics import f1_score
 from sklearn.model_selection import TimeSeriesSplit
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 from config.settings import ml_settings
 from utils.logger import logger
@@ -125,7 +127,7 @@ def tune_lgbm(
             "random_state": ml_settings.random_state,
             "verbose": -1,
         }
-        model = lgb.LGBMClassifier(**params)
+        model = Pipeline([("scaler", StandardScaler()), ("model", lgb.LGBMClassifier(**params))])
         return _cv_f1_score(model, X, y, cv)
 
     study = optuna.create_study(direction="maximize")
@@ -192,7 +194,7 @@ def tune_xgboost(
             "verbosity": 0,
             "eval_metric": "mlogloss",
         }
-        model = xgb.XGBClassifier(**params)
+        model = Pipeline([("scaler", StandardScaler()), ("model", xgb.XGBClassifier(**params))])
         return _cv_f1_score(model, X, y, cv)
 
     study = optuna.create_study(direction="maximize")
@@ -255,7 +257,7 @@ def tune_random_forest(
             "random_state": ml_settings.random_state,
             "n_jobs": -1,
         }
-        model = RandomForestClassifier(**params)
+        model = Pipeline([("scaler", StandardScaler()), ("model", RandomForestClassifier(**params))])
         return _cv_f1_score(model, X, y, cv)
 
     study = optuna.create_study(direction="maximize")

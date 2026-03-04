@@ -25,6 +25,8 @@ import pandas as pd
 import xgboost as xgb
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 from config.settings import data_settings, ml_settings
 from ml.dataset import load_all_tickers_dataset
@@ -230,11 +232,18 @@ def _train_single_ticker(
     xgb_params  = _get_with_display("xgboost", tune_xgboost)
     rf_params   = _get_with_display("rf", tune_random_forest)
 
+    # Каждая модель обёрнута в Pipeline со StandardScaler:
+    # - деревья инвариантны к масштабу → скейлер не меняет их результат
+    # - при добавлении SVM/MLP в будущем масштабирование уже встроено
+    # - скейлер сохраняется внутри .pkl вместе с моделью — ничего дополнительно сохранять не нужно
+    def _scaled(name: str, model) -> tuple:
+        return (name, Pipeline([("scaler", StandardScaler()), ("model", model)]))
+
     ensemble = VotingClassifier(
         estimators=[
-            ("lgbm", lgb.LGBMClassifier(**lgbm_params)),
-            ("xgb", xgb.XGBClassifier(**xgb_params)),
-            ("rf", RandomForestClassifier(**rf_params)),
+            _scaled("lgbm", lgb.LGBMClassifier(**lgbm_params)),
+            _scaled("xgb", xgb.XGBClassifier(**xgb_params)),
+            _scaled("rf", RandomForestClassifier(**rf_params)),
         ],
         voting="soft",
     )
