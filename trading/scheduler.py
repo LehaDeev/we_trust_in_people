@@ -33,9 +33,10 @@ from tinkoff.dividend_gap_stats import get_gap_protection_days_bulk
 from tinkoff.dividends import get_dividend_drops_bulk
 from tinkoff.instruments import get_instrument_by_ticker
 from tinkoff.market_data import get_last_prices
+from tinkoff.portfolio import get_rub_balance
 from trading import state
 from trading.executor import TradeExecutor
-from trading.notifier import notify_close, notify_open
+from trading.notifier import notify_close, notify_insufficient_balance, notify_open
 from trading.profitability import calculate_pnl
 from utils.logger import logger
 
@@ -232,6 +233,15 @@ class TradingScheduler:
             open_count = len(open_by_asset)
             max_positions = trading_settings.max_open_positions
 
+            # Получаем баланс один раз перед циклом BUY-сигналов.
+            # Обновляем локально после каждой успешной покупки, чтобы
+            # не отправлять заявки когда средства уже зарезервированы.
+            try:
+                rub_balance = await get_rub_balance()
+            except Exception as e:
+                logger.warning("Не удалось получить баланс", error=str(e))
+                rub_balance = Decimal("0")
+
             for sig in signals:
                 ticker: str = sig.get("ticker", "")
                 signal_type: str = sig.get("signal", "HOLD")
@@ -324,6 +334,19 @@ class TradingScheduler:
                     # Получаем размер лота через API (с graceful degradation)
                     lot_size = await _get_lot_size(ticker)
 
+                    # Проверяем баланс перед выставлением ордера
+                    lots = trading_settings.lots_per_ticker
+                    needed = current_price * lots * lot_size
+                    if rub_balance < needed:
+                        logger.warning(
+                            "BUY-сигнал пропущен: недостаточно средств",
+                            ticker=ticker,
+                            needed=str(needed),
+                            available=str(rub_balance),
+                        )
+                        await notify_insufficient_balance(ticker, needed, rub_balance)
+                        continue
+
                     new_trade = await self._executor.open_position(
                         session=session,
                         asset=asset,
@@ -334,6 +357,7 @@ class TradingScheduler:
                     if new_trade:
                         open_by_asset[asset.id] = new_trade
                         open_count += 1
+                        rub_balance -= needed  # уменьшаем локально для следующих BUY в этом тике
                         await notify_open(
                             ticker=ticker,
                             price=new_trade.entry_price,

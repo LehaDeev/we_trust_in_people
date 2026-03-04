@@ -87,6 +87,28 @@ async def notify_open(
     await _send(text)
 
 
+async def notify_insufficient_balance(
+    ticker: str,
+    needed: Decimal,
+    available: Decimal,
+) -> None:
+    """
+    Уведомить о пропуске BUY-сигнала из-за недостатка средств.
+
+    Аргументы:
+        ticker:    тикер инструмента
+        needed:    требуемая сумма для покупки
+        available: текущий свободный баланс в рублях
+    """
+    text = (
+        f"⚠️ <b>Недостаточно средств: {ticker}</b>\n"
+        f"Нужно:    <b>{needed:.2f} ₽</b>\n"
+        f"Доступно: <b>{available:.2f} ₽</b>\n"
+        f"<i>BUY-сигнал пропущен</i>"
+    )
+    await _send(text)
+
+
 async def notify_close(
     ticker: str,
     entry_price: Decimal,
