@@ -7,7 +7,7 @@
 
 - **Tinkoff Invest API** — асинхронная интеграция, боевой режим, rate limiter
 - **Сбор рыночных данных** — исторические свечи по списку тикеров, инкрементальное обновление
-- **ML-ансамбль** — отдельный LightGBM + XGBoost + RandomForest для каждого тикера, Optuna HPO, сигналы BUY / SELL / HOLD
+- **ML-ансамбль** — отдельный LightGBM + XGBoost + RandomForest для каждого тикера, Optuna HPO, сигналы BUY / SELL / HOLD; каждая модель обёрнута в `Pipeline(StandardScaler)` для поддержки масштабо-зависимых алгоритмов в будущем
 - **Ночное дообучение** — каждую ночь инкрементально собирает новые свечи и переобучает модели на свежих данных
 - **Redis-кеш** — свечи, цены, портфель, сигналы; graceful degradation при недоступности Redis
 - **Telegram-бот** — полностью inline-интерфейс (без ReplyKeyboard)
@@ -61,6 +61,11 @@ python -m scripts.collect_candles
 python -m scripts.train_model
 # Для принудительного повтора Optuna HPO:
 # python -m scripts.train_model --force-tune
+#
+# --force-tune ОБЯЗАТЕЛЕН после:
+#   - изменения набора признаков (features.py)
+#   - изменения структуры модели (Pipeline, estimator)
+#   - удаления старых файлов best_params_*.json
 
 # 8. Запустить Telegram-бот (включает автоторговлю)
 python -m scripts.run_bot
@@ -201,6 +206,43 @@ we_trust_in_people/
 
 Гиперпараметры кешируются в `ml/weights/best_params_{model}_{ticker}_{version}.json`.
 При повторном запуске без `--force-tune` HPO пропускается — используется кеш.
+
+### ML-признаки
+
+Все 20 признаков нормализованы — не зависят от абсолютного уровня цены тикера.
+Это обеспечивает стационарность и корректное дообучение при росте или падении цены со временем.
+
+| Группа | Признак | Описание |
+|---|---|---|
+| Тренд | `SMA_20`, `SMA_50` | Скользящие средние |
+| Тренд | `ema12_ratio`, `ema26_ratio` | `close / EMA` — цена выше EMA > 1 (бычий), ниже < 1 |
+| Тренд | `ADX_14` | Сила тренда (0–100) |
+| Импульс | `RSI_14` | Осциллятор перекупленности/перепроданности |
+| Импульс | `MACD`, `MACD_signal`, `MACD_hist` | MACD-индикатор |
+| Импульс | `ROC_10` | Темп изменения цены за 10 свечей |
+| Волатильность | `bb_pct_b` | Bollinger %B: позиция в полосах [0 = нижняя, 1 = верхняя] |
+| Волатильность | `atr_ratio` | `ATR_14 / close` — волатильность как % от цены |
+| Волатильность | `BB_width` | `(BB_upper − BB_lower) / BB_mid` — ширина полос |
+| Объём | `OBV` | On-Balance Volume |
+| Объём | `VOLUME_SMA_20` | Скользящее среднее объёма |
+| Объём | `volume_ratio` | `volume / VOLUME_SMA_20` — повышенный объём > 1 |
+| Производные | `close_sma20_ratio`, `close_sma50_ratio` | Цена относительно SMA |
+| Производные | `high_low_ratio` | `(high − low) / close` — диапазон бара |
+| Производные | `sma20_sma50_ratio` | > 1 = золотой крест (бычий), < 1 = мёртвый крест |
+
+### StandardScaler Pipeline
+
+Каждая из трёх моделей ансамбля обёрнута в `sklearn.pipeline.Pipeline`:
+
+```python
+Pipeline([("scaler", StandardScaler()), ("model", LGBMClassifier(...))])
+```
+
+Scaler сохраняется внутри `.pkl`-файла вместе с моделью. Код инференса (`predict.py`)
+не требует изменений при добавлении новых масштабо-зависимых алгоритмов.
+
+> **Важно:** после изменения набора признаков или структуры Pipeline необходимо
+> удалить старые `.pkl` и запустить `python -m scripts.train_model --force-tune`.
 
 ### Redis
 
