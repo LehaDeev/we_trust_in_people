@@ -149,60 +149,63 @@ async def collect_for_ticker(
     )
 
 
-async def main() -> None:
-    """Запустить сбор данных по всем тикерам из настроек."""
+async def run_collection() -> None:
+    """
+    Собрать новые свечи по всем тикерам из настроек.
+
+    В отличие от main() — не управляет жизненным циклом БД (init_db / close_db).
+    Предназначена для вызова внутри уже запущенного процесса (бот, планировщик).
+    """
     tickers = data_settings.tickers
     candle_interval = _get_candle_interval(data_settings.candle_interval)
     interval_str = data_settings.candle_interval
     history_days = data_settings.history_days
 
     logger.info(
-        "Starting candle collection",
+        "Инкрементальный сбор свечей",
         tickers=tickers,
         interval=interval_str,
-        history_days=history_days,
+    )
+
+    instruments = await get_instruments_by_tickers(tickers)
+    if not instruments:
+        raise RuntimeError("Инструменты не найдены в Tinkoff API")
+
+    missing = [t for t in tickers if t not in instruments]
+    if missing:
+        logger.warning("Тикеры не найдены в API", missing=missing)
+
+    for ticker, info in instruments.items():
+        try:
+            await collect_for_ticker(
+                ticker=ticker,
+                figi=info.figi,
+                uid=info.uid,
+                name=info.name,
+                currency=info.currency,
+                candle_interval=candle_interval,
+                interval_str=interval_str,
+                history_days=history_days,
+            )
+        except Exception as e:
+            logger.error("Ошибка сбора тикера", ticker=ticker, error=str(e))
+
+    logger.info("Сбор свечей завершён", processed=len(instruments))
+
+
+async def main() -> None:
+    """Запустить сбор данных по всем тикерам из настроек."""
+    logger.info(
+        "Starting candle collection",
+        tickers=data_settings.tickers,
+        interval=data_settings.candle_interval,
+        history_days=data_settings.history_days,
     )
 
     await init_db()
 
     try:
-        # Найти инструменты в Tinkoff API
-        logger.info("Resolving instruments...")
-        instruments = await get_instruments_by_tickers(tickers)
-
-        if not instruments:
-            logger.error("No instruments found, aborting")
-            return
-
-        logger.info(
-            "Instruments resolved",
-            found=len(instruments),
-            missing=[t for t in tickers if t not in instruments],
-        )
-
-        # Собираем данные последовательно (не параллельно — ограничения API)
-        for ticker, info in instruments.items():
-            try:
-                await collect_for_ticker(
-                    ticker=ticker,
-                    figi=info.figi,
-                    uid=info.uid,
-                    name=info.name,
-                    currency=info.currency,
-                    candle_interval=candle_interval,
-                    interval_str=interval_str,
-                    history_days=history_days,
-                )
-            except Exception as e:
-                logger.error(
-                    "Failed to collect ticker",
-                    ticker=ticker,
-                    error=str(e),
-                )
-                continue
-
-        logger.info("Collection complete", processed=len(instruments))
-
+        await run_collection()
     finally:
         await close_db()
 

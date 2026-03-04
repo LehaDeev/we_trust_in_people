@@ -1,10 +1,11 @@
 """
-Telegram-уведомления о сделках автоторговли.
+Telegram-уведомления о сделках автоторговли и ночном дообучении.
 
 Использует Bot-синглтон, установленный при старте в bot/main.py через set_bot().
 При пустом TRADING_CHAT_ID уведомления логируются и пропускаются.
 """
 from decimal import Decimal
+from pathlib import Path
 
 from aiogram import Bot
 
@@ -160,5 +161,40 @@ async def notify_close(
         f"НДФЛ:      −{tax:.2f} ₽\n"
         f"─────────────────\n"
         f"<b>Чистый P&L: {net_sign}{net_pnl:.2f} ₽</b>"
+    )
+    await _send(text)
+
+
+async def notify_retrain_done(
+    results: dict[str, Path],
+    failed: list[str],
+) -> None:
+    """
+    Уведомить об успешном завершении ночного дообучения.
+
+    Аргументы:
+        results: словарь {ticker: path} успешно обученных тикеров
+        failed:  список тикеров с ошибками
+    """
+    total = len(results) + len(failed)
+    lines = [f"🤖 <b>Ночное дообучение завершено</b>"]
+    lines.append(f"Обучено: <b>{len(results)}/{total}</b> тикеров")
+    for ticker in results:
+        lines.append(f"  ✓ {ticker}")
+    for ticker in failed:
+        lines.append(f"  ✗ {ticker} — ошибка")
+    await _send("\n".join(lines))
+
+
+async def notify_retrain_error(error: str) -> None:
+    """
+    Уведомить об ошибке ночного дообучения.
+
+    Аргументы:
+        error: текст ошибки
+    """
+    text = (
+        f"🚨 <b>Ошибка ночного дообучения</b>\n"
+        f"<code>{error[:400]}</code>"
     )
     await _send(text)

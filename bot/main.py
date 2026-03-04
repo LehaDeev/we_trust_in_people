@@ -17,6 +17,7 @@ from bot.handlers import portfolio, signals, start, trading
 from config.settings import telegram_settings
 from db.database import close_db, init_db
 from trading.notifier import set_bot
+from trading.retrain_scheduler import RetrainScheduler
 from trading.scheduler import TradingScheduler
 from utils.logger import logger
 from utils.redis_cache import close_redis, init_redis
@@ -43,18 +44,20 @@ async def main() -> None:
     dp.include_router(portfolio.router)
     dp.include_router(trading.router)
 
-    # Запускаем планировщик автоторговли как фоновую задачу
+    # Запускаем планировщики как фоновые задачи
     scheduler_task = asyncio.create_task(TradingScheduler().run())
+    retrain_task = asyncio.create_task(RetrainScheduler().run())
 
     logger.info("Бот запущен, начинаю polling...")
     try:
         await dp.start_polling(bot)
     finally:
-        scheduler_task.cancel()
-        try:
-            await scheduler_task
-        except asyncio.CancelledError:
-            pass
+        for task in (scheduler_task, retrain_task):
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
         await close_redis()
         await close_db()
         await bot.session.close()

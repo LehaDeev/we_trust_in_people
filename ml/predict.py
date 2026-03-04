@@ -174,6 +174,17 @@ async def predict_signal(
     return result
 
 
+def clear_model_cache() -> None:
+    """
+    Очистить in-memory кеш загруженных ансамблей.
+
+    Вызывать после переобучения моделей — следующий вызов predict_signal()
+    загрузит обновлённые веса с диска.
+    """
+    _model_cache.clear()
+    logger.info("In-memory кеш моделей очищен")
+
+
 async def predict_all(
     tickers: list[str] | None = None,
     model_version: str | None = None,

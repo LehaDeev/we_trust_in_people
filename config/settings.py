@@ -240,6 +240,31 @@ class TradingSettings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
+class RetrainSettings(BaseSettings):
+    """
+    Параметры ночного дообучения ML-моделей.
+
+    Каждую ночь в RETRAIN_HOUR:RETRAIN_MINUTE (по московскому времени)
+    бот инкрементально собирает новые свечи из Tinkoff API и переобучает
+    per-ticker ансамбли на всех накопленных данных.
+    Optuna HPO при этом пропускается — используются кешированные параметры.
+    """
+
+    # Включить/выключить ночное дообучение
+    enabled: bool = Field(True, alias="RETRAIN_ENABLED")
+    # Час запуска по RETRAIN_TIMEZONE (0–23)
+    hour: int = Field(2, alias="RETRAIN_HOUR")
+    # Минута запуска (0–59)
+    minute: int = Field(0, alias="RETRAIN_MINUTE")
+    # Часовой пояс по имени IANA (например "Europe/Moscow")
+    timezone: str = Field("Europe/Moscow", alias="RETRAIN_TIMEZONE")
+    # Принудительный перезапуск Optuna HPO при ночном переобучении.
+    # Оставить false — HPO занимает часы, нецелесообразно каждую ночь.
+    force_tune: bool = Field(False, alias="RETRAIN_FORCE_TUNE")
+
+    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+
+
 # Синглтоны — импортировать в других модулях
 tinkoff_settings = TinkoffSettings()
 telegram_settings = TelegramSettings()
@@ -250,3 +275,4 @@ app_settings = AppSettings()
 redis_settings = RedisSettings()
 agent_settings = AgentSettings()
 trading_settings = TradingSettings()
+retrain_settings = RetrainSettings()

@@ -15,24 +15,24 @@ import asyncio
 import sys
 
 from db.database import init_db
+from trading.retrain_scheduler import RetrainScheduler
 from trading.scheduler import TradingScheduler
 from utils.logger import logger
 from utils.redis_cache import init_redis
 
 
 async def main() -> None:
-    """Инициализировать зависимости и запустить планировщик торговли."""
+    """Инициализировать зависимости и запустить планировщики торговли и дообучения."""
     logger.info("Инициализация автоторговли...")
 
-    # Инициализируем БД (создаём таблицы если не существуют)
     await init_db()
-
-    # Инициализируем Redis (graceful: если недоступен — работаем без кеша)
     await init_redis()
 
-    scheduler = TradingScheduler()
+    trading_task = asyncio.create_task(TradingScheduler().run())
+    retrain_task = asyncio.create_task(RetrainScheduler().run())
+
     try:
-        await scheduler.run()
+        await asyncio.gather(trading_task, retrain_task)
     except KeyboardInterrupt:
         logger.info("Автоторговля остановлена пользователем")
         sys.exit(0)
