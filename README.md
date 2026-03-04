@@ -7,7 +7,7 @@
 
 - **Tinkoff Invest API** — асинхронная интеграция, боевой режим, rate limiter
 - **Сбор рыночных данных** — исторические свечи по списку тикеров, инкрементальное обновление
-- **ML-ансамбль** — LightGBM + XGBoost + RandomForest с Optuna HPO, сигналы BUY / SELL / HOLD
+- **ML-ансамбль** — отдельный LightGBM + XGBoost + RandomForest для каждого тикера, Optuna HPO, сигналы BUY / SELL / HOLD
 - **Redis-кеш** — свечи, цены, портфель, сигналы; graceful degradation при недоступности Redis
 - **Telegram-бот** — полностью inline-интерфейс (без ReplyKeyboard)
 - **Портфель** — сводка по счёту + детализация по категориям (акции / облигации / ETF / валюта) с количеством и средней ценой покупки
@@ -87,7 +87,7 @@ we_trust_in_people/
 │   ├── dataset.py           # Загрузка данных из БД (кеш Redis)
 │   ├── train.py             # Обучение ансамбля + Optuna HPO
 │   ├── predict.py           # Инференс, predict_all() (кеш Redis)
-│   └── weights/             # Веса моделей (не в репозитории)
+│   └── weights/             # Веса моделей (не в репозитории): ensemble_{ticker}_{version}.pkl
 ├── trading/
 │   ├── __init__.py
 │   ├── state.py             # Runtime-флаг авто/ручной режим

@@ -1,14 +1,13 @@
 """
-Обучение ансамбля моделей для предсказания сигналов BUY/SELL/HOLD.
+Обучение ансамблей моделей — по одному на каждый тикер.
 
-Pipeline:
+Для каждого тикера выполняется отдельный pipeline:
     1. Загрузка свечей из PostgreSQL
     2. Вычисление признаков (TA-Lib индикаторы)
     3. Генерация меток по будущей доходности
-    4. Подбор гиперпараметров через Optuna (с кешем из best_params_*.json)
-    5. Обучение финальных моделей на полном датасете
-    6. Сборка soft voting ансамбля
-    7. Сохранение весов в ml/weights/
+    4. Подбор гиперпараметров через Optuna (с кешем best_params_*_{ticker}_{version}.json)
+    5. Обучение финального ансамбля (LightGBM + XGBoost + RandomForest)
+    6. Сохранение весов в ml/weights/ensemble_{ticker}_{version}.pkl
 
 Запуск:
     python -m scripts.train_model               # Optuna только если нет кеша
@@ -39,17 +38,18 @@ WEIGHTS_DIR = Path(__file__).parent / "weights"
 
 # ── Кеш гиперпараметров ──────────────────────────────────────────────────────
 
-def _load_cached_params(model_name: str) -> dict | None:
+def _load_cached_params(model_name: str, ticker_version: str) -> dict | None:
     """
     Загрузить сохранённые гиперпараметры из JSON-файла, если он существует.
 
     Аргументы:
-        model_name: имя модели ("lgbm", "xgboost", "rf").
+        model_name:     имя модели ("lgbm", "xgboost", "rf").
+        ticker_version: строка вида "{ticker}_{version}" (например, "SBER_v2").
 
     Возвращает:
         Словарь параметров или None если кеша нет.
     """
-    path = WEIGHTS_DIR / f"best_params_{model_name}_{ml_settings.model_version}.json"
+    path = WEIGHTS_DIR / f"best_params_{model_name}_{ticker_version}.json"
     if path.exists():
         with open(path) as f:
             params = json.load(f)
@@ -60,6 +60,7 @@ def _load_cached_params(model_name: str) -> dict | None:
 
 def _get_params(
     model_name: str,
+    ticker_version: str,
     tune_fn,
     X: pd.DataFrame,
     y: pd.Series,
@@ -69,82 +70,68 @@ def _get_params(
     Вернуть гиперпараметры: из кеша если есть, иначе запустить Optuna.
 
     Аргументы:
-        model_name: имя модели для поиска кеша.
-        tune_fn:    функция подбора параметров из ml/tune.py.
-        X:          DataFrame признаков.
-        y:          Series меток.
-        force_tune: если True — игнорировать кеш и запустить Optuna заново.
+        model_name:     имя модели для поиска кеша.
+        ticker_version: строка "{ticker}_{version}" для имён файлов.
+        tune_fn:        функция подбора параметров из ml/tune.py.
+        X:              DataFrame признаков.
+        y:              Series меток.
+        force_tune:     если True — игнорировать кеш и запустить Optuna заново.
 
     Возвращает:
         Словарь гиперпараметров.
     """
     if not force_tune:
-        cached = _load_cached_params(model_name)
+        cached = _load_cached_params(model_name, ticker_version)
         if cached is not None:
             return cached
 
-    logger.info("Запуск Optuna HPO", model=model_name)
-    return tune_fn(X, y)
+    logger.info("Запуск Optuna HPO", model=model_name, ticker_version=ticker_version)
+    return tune_fn(X, y, version=ticker_version)
 
 
-# ── Сборка датасета ──────────────────────────────────────────────────────────
+# ── Сборка датасета для одного тикера ────────────────────────────────────────
 
-def _build_dataset(raw: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:
+def _build_ticker_dataset(
+    group: pd.DataFrame,
+    ticker: str,
+) -> tuple[pd.DataFrame, pd.Series]:
     """
-    Применить вычисление признаков и генерацию меток отдельно по каждому тикеру.
+    Вычислить признаки и метки для одного тикера.
 
     Аргументы:
-        raw: объединённый DataFrame с колонками [ticker, time, open, high, low, close, volume].
+        group:  DataFrame свечей одного тикера [time, open, high, low, close, volume].
+        ticker: тикер (только для логирования).
 
     Возвращает:
         (X, y): DataFrame признаков и Series меток с согласованными индексами.
     """
-    feature_frames: list[pd.DataFrame] = []
-    label_series: list[pd.Series] = []
+    feat_df = compute_features(group)
+    labels = create_labels(
+        feat_df,
+        lookahead=ml_settings.lookahead,
+        threshold=ml_settings.threshold,
+    )
+    feat_df = feat_df.loc[labels.index].copy()
 
-    for ticker, group in raw.groupby("ticker", sort=False):
-        group = group.reset_index(drop=True)
+    logger.info(
+        "Датасет тикера собран",
+        ticker=ticker,
+        samples=len(labels),
+        buy=int((labels == 2).sum()),
+        hold=int((labels == 1).sum()),
+        sell=int((labels == 0).sum()),
+    )
 
-        # Признаки (также удаляет строки прогрева с NaN)
-        feat_df = compute_features(group)
-
-        # Метки (удаляет последние lookahead строк)
-        labels = create_labels(
-            feat_df,
-            lookahead=ml_settings.lookahead,
-            threshold=ml_settings.threshold,
-        )
-
-        # Выравнивание: признаки и метки должны покрывать одни и те же строки
-        feat_df = feat_df.loc[labels.index].copy()
-
-        feature_frames.append(feat_df)
-        label_series.append(labels)
-
-        logger.info(
-            "Ticker dataset built",
-            ticker=ticker,
-            samples=len(labels),
-            buy=int((labels == 2).sum()),
-            hold=int((labels == 1).sum()),
-            sell=int((labels == 0).sum()),
-        )
-
-    if not feature_frames:
-        raise RuntimeError("Нет обучающих данных. Запустите scripts/collect_candles.py.")
-
-    combined_features = pd.concat(feature_frames, ignore_index=True)
-    combined_labels = pd.concat(label_series, ignore_index=True)
-
-    return combined_features[FEATURE_COLUMNS], combined_labels
+    return feat_df[FEATURE_COLUMNS], labels
 
 
-# ── Оценка финального ансамбля ───────────────────────────────────────────────
+# ── Оценка ансамбля ──────────────────────────────────────────────────────────
 
 def _evaluate_ensemble(
     ensemble: VotingClassifier,
     X: pd.DataFrame,
     y: pd.Series,
+    ticker: str,
 ) -> float:
     """
     Оценить ансамбль через кросс-валидацию TimeSeriesSplit.
@@ -156,38 +143,102 @@ def _evaluate_ensemble(
     scores = cross_val_score(ensemble, X, y, cv=cv, scoring="f1_macro", n_jobs=-1)
     mean_f1 = float(np.mean(scores))
     logger.info(
-        "Ensemble CV evaluation",
+        "Оценка ансамбля (CV)",
+        ticker=ticker,
         f1_per_fold=[round(s, 4) for s in scores],
         mean_f1=round(mean_f1, 4),
-        std_f1=round(float(np.std(scores)), 4),
     )
     return mean_f1
 
 
+# ── Обучение одного тикера ───────────────────────────────────────────────────
+
+def _train_single_ticker(
+    ticker: str,
+    group: pd.DataFrame,
+    force_tune: bool,
+) -> Path:
+    """
+    Полный pipeline обучения для одного тикера.
+
+    Аргументы:
+        ticker:     тикер инструмента.
+        group:      DataFrame свечей этого тикера.
+        force_tune: принудительно запустить Optuna.
+
+    Возвращает:
+        Path к сохранённому pkl ансамбля.
+    """
+    version = ml_settings.model_version
+    ticker_version = f"{ticker}_{version}"
+
+    X, y = _build_ticker_dataset(group, ticker)
+
+    if len(X) < ml_settings.n_splits * 2:
+        raise RuntimeError(
+            f"Недостаточно данных для {ticker}: {len(X)} строк. "
+            "Соберите больше свечей."
+        )
+
+    # Гиперпараметры: из кеша или через Optuna
+    lgbm_params = _get_params("lgbm", ticker_version, tune_lgbm, X, y, force_tune)
+    xgb_params = _get_params("xgboost", ticker_version, tune_xgboost, X, y, force_tune)
+    rf_params = _get_params("rf", ticker_version, tune_random_forest, X, y, force_tune)
+
+    ensemble = VotingClassifier(
+        estimators=[
+            ("lgbm", lgb.LGBMClassifier(**lgbm_params)),
+            ("xgb", xgb.XGBClassifier(**xgb_params)),
+            ("rf", RandomForestClassifier(**rf_params)),
+        ],
+        voting="soft",
+    )
+
+    logger.info("Оценка ансамбля через TimeSeriesSplit CV...", ticker=ticker)
+    cv_f1 = _evaluate_ensemble(ensemble, X, y, ticker)
+
+    logger.info("Финальное обучение ансамбля...", ticker=ticker)
+    ensemble.fit(X, y)
+
+    ensemble_path = WEIGHTS_DIR / f"ensemble_{ticker_version}.pkl"
+    features_path = WEIGHTS_DIR / f"features_{ticker_version}.json"
+
+    with open(ensemble_path, "wb") as f:
+        pickle.dump(ensemble, f)
+    with open(features_path, "w") as f:
+        json.dump(FEATURE_COLUMNS, f, indent=2)
+
+    logger.info(
+        "Ансамбль тикера сохранён",
+        ticker=ticker,
+        ensemble_path=str(ensemble_path),
+        cv_f1_macro=round(cv_f1, 4),
+    )
+
+    return ensemble_path
+
+
 # ── Основная функция обучения ────────────────────────────────────────────────
 
-async def train_model(force_tune: bool = False) -> Path:
+async def train_model(force_tune: bool = False) -> dict[str, Path]:
     """
-    Полный pipeline: загрузка → признаки → метки → HPO (с кешем) → ансамбль → сохранение.
+    Обучить отдельный ансамбль для каждого тикера из DATA_TICKERS.
 
-    Гиперпараметры берутся из кеша (best_params_*.json) если файлы существуют.
-    При force_tune=True кеш игнорируется и Optuna запускается заново.
-    Финальное обучение ансамбля выполняется всегда на свежих данных из БД.
+    Для каждого тикера свой Optuna HPO (с кешем), свои веса.
+    Файлы: ensemble_{ticker}_{version}.pkl, features_{ticker}_{version}.json.
 
     Аргументы:
         force_tune: если True — принудительно запустить Optuna для всех моделей.
 
     Возвращает:
-        Path к сохранённому файлу ансамбля pkl.
+        Словарь {ticker: Path} для успешно обученных тикеров.
     """
     WEIGHTS_DIR.mkdir(parents=True, exist_ok=True)
 
     if force_tune:
         logger.info("Режим force_tune: Optuna будет запущена для всех моделей")
-    else:
-        logger.info("Режим обычного обучения: Optuna пропускается если есть кеш")
 
-    logger.info("Загрузка данных свечей из БД...", tickers=data_settings.tickers)
+    logger.info("Загрузка данных свечей...", tickers=data_settings.tickers)
     raw = await load_all_tickers_dataset(
         data_settings.tickers,
         interval=data_settings.candle_interval,
@@ -196,62 +247,22 @@ async def train_model(force_tune: bool = False) -> Path:
     if raw.empty:
         raise RuntimeError("Нет данных. Запустите scripts/collect_candles.py.")
 
-    logger.info("Сборка датасета признаков и меток...")
-    X, y = _build_dataset(raw)
+    results: dict[str, Path] = {}
+
+    for ticker, group in raw.groupby("ticker", sort=False):
+        ticker = str(ticker)
+        group = group.reset_index(drop=True)
+        logger.info("Обучение модели", ticker=ticker)
+        try:
+            path = _train_single_ticker(ticker, group, force_tune)
+            results[ticker] = path
+        except Exception as e:
+            logger.error("Ошибка обучения тикера", ticker=ticker, error=str(e))
 
     logger.info(
-        "Датасет готов",
-        total_samples=len(X),
-        features=len(FEATURE_COLUMNS),
-        lookahead=ml_settings.lookahead,
-        threshold=ml_settings.threshold,
-        class_distribution=y.value_counts().to_dict(),
+        "Обучение завершено",
+        trained=list(results.keys()),
+        failed=[t for t in data_settings.tickers if t not in results],
     )
 
-    # ── Гиперпараметры: из кеша или через Optuna ──────────────────────────────
-    lgbm_params = _get_params("lgbm", tune_lgbm, X, y, force_tune)
-    xgb_params = _get_params("xgboost", tune_xgboost, X, y, force_tune)
-    rf_params = _get_params("rf", tune_random_forest, X, y, force_tune)
-
-    # ── Создание финальных моделей с лучшими параметрами ─────────────────────
-    lgbm_model = lgb.LGBMClassifier(**lgbm_params)
-    xgb_model = xgb.XGBClassifier(**xgb_params)
-    rf_model = RandomForestClassifier(**rf_params)
-
-    # ── Soft voting ансамбль ──────────────────────────────────────────────────
-    # voting='soft' — усредняем вероятности, не голосуем за класс (точнее)
-    ensemble = VotingClassifier(
-        estimators=[
-            ("lgbm", lgbm_model),
-            ("xgb", xgb_model),
-            ("rf", rf_model),
-        ],
-        voting="soft",
-    )
-
-    # ── Оценка до финального обучения ─────────────────────────────────────────
-    logger.info("Оценка ансамбля через TimeSeriesSplit CV...")
-    cv_f1 = _evaluate_ensemble(ensemble, X, y)
-
-    # ── Финальное обучение на полном датасете (всегда на свежих данных) ───────
-    logger.info("Финальное обучение ансамбля на полном датасете...")
-    ensemble.fit(X, y)
-
-    # ── Сохранение ────────────────────────────────────────────────────────────
-    version = ml_settings.model_version
-    ensemble_path = WEIGHTS_DIR / f"ensemble_{version}.pkl"
-    with open(ensemble_path, "wb") as f:
-        pickle.dump(ensemble, f)
-
-    features_path = WEIGHTS_DIR / f"features_{version}.json"
-    with open(features_path, "w") as f:
-        json.dump(FEATURE_COLUMNS, f, indent=2)
-
-    logger.info(
-        "Ансамбль сохранён",
-        ensemble_path=str(ensemble_path),
-        features_path=str(features_path),
-        cv_f1_macro=round(cv_f1, 4),
-    )
-
-    return ensemble_path
+    return results

@@ -1,5 +1,5 @@
 """
-Точка входа для обучения ансамбля ML-моделей.
+Точка входа для обучения ML-моделей — по одному ансамблю на каждый тикер.
 
 Запуск:
     python -m scripts.train_model               # Optuna только если нет кеша (или ML_FORCE_TUNE=true в .env)
@@ -7,16 +7,16 @@
 
 Приоритет force_tune: CLI-флаг > ML_FORCE_TUNE в .env.
 
-Что делает:
-    1. Загружает свежие свечи из PostgreSQL для всех тикеров
+Что делает (для каждого тикера из DATA_TICKERS):
+    1. Загружает свежие свечи из PostgreSQL
     2. Вычисляет технические индикаторы (TA-Lib)
     3. Генерирует метки BUY/SELL/HOLD
     4. Подбирает гиперпараметры через Optuna (пропускает если есть кеш):
        - LightGBM     — ML_OPTUNA_TRIALS_LGBM trials
        - XGBoost      — ML_OPTUNA_TRIALS_XGB trials
        - RandomForest — ML_OPTUNA_TRIALS_RF trials
-    5. Обучает soft voting ансамбль на полном датасете
-    6. Сохраняет веса в ml/weights/ensemble_{ML_MODEL_VERSION}.pkl
+    5. Обучает soft voting ансамбль на данных этого тикера
+    6. Сохраняет веса в ml/weights/ensemble_{ticker}_{ML_MODEL_VERSION}.pkl
 """
 import argparse
 import asyncio
@@ -49,8 +49,12 @@ async def main(force_tune: bool) -> None:
     await init_db()
 
     try:
-        model_path = await train_model(force_tune=force_tune)
-        logger.info("Обучение завершено", model_path=str(model_path))
+        results = await train_model(force_tune=force_tune)
+        logger.info(
+            "Обучение завершено",
+            trained=list(results.keys()),
+            paths={t: str(p) for t, p in results.items()},
+        )
     finally:
         await close_db()
 

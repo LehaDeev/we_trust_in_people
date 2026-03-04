@@ -1,9 +1,12 @@
 """
 Инференс: генерация сигнала BUY/SELL/HOLD для одного тикера.
 
+Каждый тикер имеет свою модель (ensemble_{ticker}_{version}.pkl),
+обученную только на его исторических данных.
+
 Кеширование (двухуровневое):
     1. In-memory (_model_cache): загруженные pickle-модели хранятся в памяти процесса.
-       Исключает повторные disk-reads при каждом запросе.
+       Ключ: "{ticker}_{version}". Исключает повторные disk-reads.
     2. Redis: результат predict_signal() кешируется на REDIS_SIGNAL_TTL секунд.
        При недоступном Redis — graceful degradation (прямой вызов без кеша).
 
@@ -29,33 +32,36 @@ from utils.redis_cache import get_redis
 
 WEIGHTS_DIR = Path(__file__).parent / "weights"
 
-# In-memory кеш загруженных моделей: version → (ensemble, feature_columns)
-# Избегает повторных pickle.load при каждом запросе к predict_signal()
+# In-memory кеш загруженных моделей: "{ticker}_{version}" → (ensemble, feature_columns)
+# Каждый тикер хранит свой ансамбль отдельно.
 _model_cache: dict[str, tuple] = {}
 
 
-def _load_model(version: str) -> tuple:
+def _load_model(ticker: str, version: str) -> tuple:
     """
-    Загрузить ансамбль и список признаков с диска (или из in-memory кеша).
+    Загрузить ансамбль тикера и список признаков (из памяти или с диска).
 
     Аргументы:
+        ticker:  тикер инструмента (например, "SBER").
         version: версия модели (например, "v2").
 
     Возвращает:
         (ensemble, feature_columns): объект VotingClassifier и список имён признаков.
 
     Исключения:
-        FileNotFoundError: если файл весов не найден.
+        FileNotFoundError: если файл весов для тикера не найден.
     """
-    if version in _model_cache:
-        return _model_cache[version]
+    cache_key = f"{ticker}_{version}"
+    if cache_key in _model_cache:
+        return _model_cache[cache_key]
 
-    ensemble_path = WEIGHTS_DIR / f"ensemble_{version}.pkl"
-    features_path = WEIGHTS_DIR / f"features_{version}.json"
+    ticker_version = f"{ticker}_{version}"
+    ensemble_path = WEIGHTS_DIR / f"ensemble_{ticker_version}.pkl"
+    features_path = WEIGHTS_DIR / f"features_{ticker_version}.json"
 
     if not ensemble_path.exists():
         raise FileNotFoundError(
-            f"Веса ансамбля не найдены: {ensemble_path}\n"
+            f"Модель для {ticker} не найдена: {ensemble_path}\n"
             "Запустите: python -m scripts.train_model"
         )
 
@@ -64,8 +70,8 @@ def _load_model(version: str) -> tuple:
     with open(features_path) as f:
         feature_columns: list[str] = json.load(f)
 
-    _model_cache[version] = (ensemble, feature_columns)
-    logger.info("Модель загружена в память", version=version)
+    _model_cache[cache_key] = (ensemble, feature_columns)
+    logger.info("Модель загружена в память", ticker=ticker, version=version)
     return ensemble, feature_columns
 
 
@@ -77,8 +83,8 @@ async def predict_signal(
     """
     Сгенерировать сигнал BUY/SELL/HOLD для заданного тикера.
 
+    Использует модель, обученную исключительно на данных этого тикера.
     Результат кешируется в Redis на REDIS_SIGNAL_TTL секунд.
-    При недоступном Redis — прямой вызов без кеша (graceful degradation).
 
     Аргументы:
         ticker:        тикер инструмента (например, "SBER").
@@ -93,7 +99,7 @@ async def predict_signal(
             probabilities (dict): {"SELL": p, "HOLD": p, "BUY": p}
 
     Исключения:
-        FileNotFoundError: если веса ансамбля не найдены.
+        FileNotFoundError: если веса ансамбля для тикера не найдены.
         ValueError:        если недостаточно данных свечей.
     """
     version = model_version or ml_settings.model_version
@@ -112,8 +118,8 @@ async def predict_signal(
         except Exception as e:
             logger.warning("Redis get error", key=cache_key, error=str(e))
 
-    # ── Загрузка модели (in-memory кеш) ──────────────────────────────────────
-    ensemble, feature_columns = _load_model(version)
+    # ── Загрузка модели тикера (in-memory кеш) ────────────────────────────────
+    ensemble, feature_columns = _load_model(ticker, version)
 
     # ── Загрузка данных свечей ────────────────────────────────────────────────
     df = await load_ticker_data(ticker, candle_interval)
@@ -124,20 +130,18 @@ async def predict_signal(
             f"{len(df)} < {ml_settings.min_candles_predict}."
         )
 
-    # Берём только последние свечи для ускорения инференса
     df = df.tail(ml_settings.min_candles_predict).reset_index(drop=True)
 
-    # ── Вычисляем признаки (строки прогрева удаляются внутри) ────────────────
+    # ── Вычисляем признаки ────────────────────────────────────────────────────
     feat_df = compute_features(df)
 
     if feat_df.empty:
         raise ValueError(f"Нет валидных строк признаков для {ticker} после прогрева.")
 
-    # Берём последнюю строку (самую свежую)
     last_row = feat_df[feature_columns].iloc[[-1]]
 
-    # ── Предсказание ансамбля: усредняем вероятности трёх моделей ────────────
-    proba = ensemble.predict_proba(last_row)[0]  # форма: (3,) — SELL, HOLD, BUY
+    # ── Предсказание: усредняем вероятности трёх моделей ансамбля ────────────
+    proba = ensemble.predict_proba(last_row)[0]
     predicted_class = int(np.argmax(proba))
     confidence = float(proba[predicted_class])
     signal = LABEL_NAMES[predicted_class]
