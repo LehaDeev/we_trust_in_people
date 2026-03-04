@@ -35,6 +35,44 @@ from utils.logger import logger
 
 WEIGHTS_DIR = Path(__file__).parent / "weights"
 
+_SEP = "═" * 56
+
+
+# ── Вывод прогресса в терминал ───────────────────────────────────────────────
+
+def _print_ticker_header(ticker: str, index: int, total: int, samples: int) -> None:
+    """Вывести заголовок секции обучения тикера."""
+    print(f"\n{_SEP}", flush=True)
+    print(f"  [{index}/{total}] {ticker}  ({samples} строк)", flush=True)
+    print(_SEP, flush=True)
+
+
+def _print_step(msg: str) -> None:
+    """Вывести шаг (без переноса строки — ожидается OK или новая строка)."""
+    print(f"  ▶ {msg}", end="", flush=True)
+
+
+def _print_cached(label: str) -> None:
+    """Вывести строку о загрузке из кеша."""
+    print(f"    {label:<14} [из кеша]", flush=True)
+
+
+def _print_ok(extra: str = "") -> None:
+    """Вывести ✓ после _print_step."""
+    suffix = f"  {extra}" if extra else ""
+    print(f" ✓{suffix}", flush=True)
+
+
+def _print_summary(results: dict[str, Path], failed: list[str]) -> None:
+    """Вывести итоговую сводку."""
+    print(f"\n{_SEP}", flush=True)
+    print(f"  ИТОГ: {len(results)}/{len(results) + len(failed)} тикеров обучено", flush=True)
+    for ticker, path in results.items():
+        print(f"    ✓ {ticker:<8} → {path.name}", flush=True)
+    for ticker in failed:
+        print(f"    ✗ {ticker:<8} — ошибка (см. лог)", flush=True)
+    print(_SEP, flush=True)
+
 
 # ── Кеш гиперпараметров ──────────────────────────────────────────────────────
 
@@ -180,10 +218,17 @@ def _train_single_ticker(
             "Соберите больше свечей."
         )
 
-    # Гиперпараметры: из кеша или через Optuna
-    lgbm_params = _get_params("lgbm", ticker_version, tune_lgbm, X, y, force_tune)
-    xgb_params = _get_params("xgboost", ticker_version, tune_xgboost, X, y, force_tune)
-    rf_params = _get_params("rf", ticker_version, tune_random_forest, X, y, force_tune)
+    # Гиперпараметры: из кеша или через Optuna (с прогрессом в терминале)
+    def _get_with_display(model_name: str, tune_fn) -> dict:
+        cached = None if force_tune else _load_cached_params(model_name, ticker_version)
+        if cached is not None:
+            _print_cached(f"{model_name.upper()} HPO")
+            return cached
+        return _get_params(model_name, ticker_version, tune_fn, X, y, force_tune)
+
+    lgbm_params = _get_with_display("lgbm", tune_lgbm)
+    xgb_params  = _get_with_display("xgboost", tune_xgboost)
+    rf_params   = _get_with_display("rf", tune_random_forest)
 
     ensemble = VotingClassifier(
         estimators=[
@@ -194,11 +239,13 @@ def _train_single_ticker(
         voting="soft",
     )
 
-    logger.info("Оценка ансамбля через TimeSeriesSplit CV...", ticker=ticker)
+    _print_step("CV оценка ансамбля...")
     cv_f1 = _evaluate_ensemble(ensemble, X, y, ticker)
+    _print_ok(f"F1={cv_f1:.4f}")
 
-    logger.info("Финальное обучение ансамбля...", ticker=ticker)
+    _print_step("Финальное обучение ансамбля...")
     ensemble.fit(X, y)
+    _print_ok()
 
     ensemble_path = WEIGHTS_DIR / f"ensemble_{ticker_version}.pkl"
     features_path = WEIGHTS_DIR / f"features_{ticker_version}.json"
@@ -208,12 +255,7 @@ def _train_single_ticker(
     with open(features_path, "w") as f:
         json.dump(FEATURE_COLUMNS, f, indent=2)
 
-    logger.info(
-        "Ансамбль тикера сохранён",
-        ticker=ticker,
-        ensemble_path=str(ensemble_path),
-        cv_f1_macro=round(cv_f1, 4),
-    )
+    print(f"  Сохранено: {ensemble_path.name}", flush=True)
 
     return ensemble_path
 
@@ -248,21 +290,28 @@ async def train_model(force_tune: bool = False) -> dict[str, Path]:
         raise RuntimeError("Нет данных. Запустите scripts/collect_candles.py.")
 
     results: dict[str, Path] = {}
+    tickers_list = list(raw["ticker"].unique())
+    total = len(tickers_list)
 
-    for ticker, group in raw.groupby("ticker", sort=False):
+    for i, (ticker, group) in enumerate(raw.groupby("ticker", sort=False), 1):
         ticker = str(ticker)
         group = group.reset_index(drop=True)
+        _print_ticker_header(ticker, i, total, len(group))
         logger.info("Обучение модели", ticker=ticker)
         try:
             path = _train_single_ticker(ticker, group, force_tune)
             results[ticker] = path
         except Exception as e:
             logger.error("Ошибка обучения тикера", ticker=ticker, error=str(e))
+            print(f"  ✗ Ошибка: {e}", flush=True)
+
+    failed = [t for t in data_settings.tickers if t not in results]
+    _print_summary(results, failed)
 
     logger.info(
         "Обучение завершено",
         trained=list(results.keys()),
-        failed=[t for t in data_settings.tickers if t not in results],
+        failed=failed,
     )
 
     return results

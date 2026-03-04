@@ -23,10 +23,36 @@ from sklearn.model_selection import TimeSeriesSplit
 from config.settings import ml_settings
 from utils.logger import logger
 
-# Подавляем стандартный вывод Optuna — используем structlog
+# Подавляем стандартный вывод Optuna — используем собственный прогресс
 optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 WEIGHTS_DIR = Path(__file__).parent / "weights"
+
+_BAR_WIDTH = 20
+
+
+def _make_progress_callback(n_trials: int, label: str):
+    """
+    Создать callback для Optuna, выводящий прогресс-бар в терминал.
+
+    Аргументы:
+        n_trials: общее количество проб.
+        label:    название модели для отображения.
+    """
+    def callback(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
+        done = trial.number + 1
+        filled = int(_BAR_WIDTH * done / n_trials)
+        bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
+        best = study.best_value if study.best_trial else 0.0
+        print(
+            f"\r    {label:<14} [{bar}] {done:>3}/{n_trials} | best F1={best:.4f}",
+            end="",
+            flush=True,
+        )
+        if done == n_trials:
+            print()  # перенос строки после завершения
+
+    return callback
 
 
 # ── Вспомогательная функция кросс-валидации ─────────────────────────────────
@@ -103,7 +129,12 @@ def tune_lgbm(
         return _cv_f1_score(model, X, y, cv)
 
     study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    study.optimize(
+        objective,
+        n_trials=n_trials,
+        show_progress_bar=False,
+        callbacks=[_make_progress_callback(n_trials, "LightGBM HPO")],
+    )
 
     best_params = study.best_params
     best_params.update({
@@ -165,7 +196,12 @@ def tune_xgboost(
         return _cv_f1_score(model, X, y, cv)
 
     study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    study.optimize(
+        objective,
+        n_trials=n_trials,
+        show_progress_bar=False,
+        callbacks=[_make_progress_callback(n_trials, "XGBoost HPO")],
+    )
 
     best_params = study.best_params
     best_params.update({
@@ -223,7 +259,12 @@ def tune_random_forest(
         return _cv_f1_score(model, X, y, cv)
 
     study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=n_trials, show_progress_bar=False)
+    study.optimize(
+        objective,
+        n_trials=n_trials,
+        show_progress_bar=False,
+        callbacks=[_make_progress_callback(n_trials, "RandomForest HPO")],
+    )
 
     best_params = study.best_params
     best_params.update({"random_state": ml_settings.random_state, "n_jobs": -1})
