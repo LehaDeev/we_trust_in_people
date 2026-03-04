@@ -56,8 +56,10 @@ alembic upgrade head
 # 6. Собрать исторические данные
 python -m scripts.collect_candles
 
-# 7. Обучить ML-модель
+# 7. Обучить ML-модели (отдельный ансамбль для каждого тикера)
 python -m scripts.train_model
+# Для принудительного повтора Optuna HPO:
+# python -m scripts.train_model --force-tune
 
 # 8. Запустить Telegram-бот (включает автоторговлю)
 python -m scripts.run_bot
@@ -85,7 +87,8 @@ we_trust_in_people/
 ├── ml/
 │   ├── features.py          # Feature engineering (TA-Lib индикаторы)
 │   ├── dataset.py           # Загрузка данных из БД (кеш Redis)
-│   ├── train.py             # Обучение ансамбля + Optuna HPO
+│   ├── train.py             # Обучение per-ticker ансамблей + Optuna HPO + прогресс в терминале
+│   ├── tune.py              # Optuna HPO для LightGBM / XGBoost / RandomForest (с progress bar)
 │   ├── predict.py           # Инференс, predict_all() (кеш Redis)
 │   └── weights/             # Веса моделей (не в репозитории): ensemble_{ticker}_{version}.pkl
 ├── trading/
@@ -148,7 +151,35 @@ we_trust_in_people/
 | `ML_LOOKAHEAD` | Свечей вперёд для генерации меток | `4` |
 | `ML_THRESHOLD` | Порог доходности ±% для BUY/SELL | `0.01` |
 | `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `50` |
+| `ML_OPTUNA_TRIALS_XGB` | Итераций Optuna для XGBoost | `30` |
+| `ML_OPTUNA_TRIALS_RF` | Итераций Optuna для RandomForest | `20` |
 | `ML_FORCE_TUNE` | Принудительный перезапуск Optuna | `false` |
+
+### Визуализация обучения
+
+При запуске `python -m scripts.train_model` прогресс отображается в терминале:
+
+```
+════════════════════════════════════════════════════════
+  [1/3] SBER  (12450 строк)
+════════════════════════════════════════════════════════
+    LightGBM HPO   [████████████████████]  50/ 50 | best F1=0.4821
+    XGBoost HPO    [████████████████████]  30/ 30 | best F1=0.4703
+    RandomForest HPO [████████████████████]  20/ 20 | best F1=0.4612
+  ▶ CV оценка ансамбля... ✓  F1=0.4891
+  ▶ Финальное обучение ансамбля... ✓
+  Сохранено: ensemble_SBER_v2.pkl
+
+════════════════════════════════════════════════════════
+  ИТОГ: 3/3 тикеров обучено
+    ✓ SBER     → ensemble_SBER_v2.pkl
+    ✓ GAZP     → ensemble_GAZP_v2.pkl
+    ✓ LKOH     → ensemble_LKOH_v2.pkl
+════════════════════════════════════════════════════════
+```
+
+Гиперпараметры кешируются в `ml/weights/best_params_{model}_{ticker}_{version}.json`.
+При повторном запуске без `--force-tune` HPO пропускается — используется кеш.
 
 ### Redis
 
