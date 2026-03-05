@@ -318,6 +318,20 @@ class TradingScheduler:
                         )
                         continue
 
+                    # Фильтр подтверждения объёмом: открываем только если объём
+                    # последнего бара превышает SMA_20(объём) на заданный коэффициент.
+                    # Повышенный объём подтверждает направленное движение,
+                    # снижает число ложных сигналов в боковике.
+                    volume_ratio: float = sig.get("volume_ratio", 1.0)
+                    if volume_ratio < trading_settings.volume_min_ratio:
+                        logger.debug(
+                            "BUY-сигнал пропущен: объём ниже порога подтверждения",
+                            ticker=ticker,
+                            volume_ratio=volume_ratio,
+                            min_ratio=trading_settings.volume_min_ratio,
+                        )
+                        continue
+
                     if open_count >= max_positions:
                         logger.info(
                             "Достигнут лимит открытых позиций",

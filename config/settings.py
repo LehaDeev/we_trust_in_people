@@ -222,6 +222,10 @@ class TradingSettings(BaseSettings):
     # Формат: TICKER:дни,TICKER:дни (например SBER:45,GAZP:90).
     # Эти значения имеют приоритет над авто-вычислением из истории.
     dividend_override_raw: str = Field("", alias="TRADING_DIVIDEND_OVERRIDE")
+    # Минимальный volume_ratio для подтверждения BUY-сигнала.
+    # volume_ratio = объём последнего бара / SMA_20(объём).
+    # 1.0 = фильтр отключён (любой объём); 1.3 = объём должен быть на 30% выше среднего.
+    volume_min_ratio: float = Field(1.0, alias="TRADING_VOLUME_MIN_RATIO")
 
     @property
     def dividend_override(self) -> dict[str, int]:

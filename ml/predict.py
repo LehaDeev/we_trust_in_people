@@ -97,6 +97,7 @@ async def predict_signal(
             signal (str):         "BUY", "HOLD" или "SELL"
             confidence (float):   вероятность для предсказанного класса
             probabilities (dict): {"SELL": p, "HOLD": p, "BUY": p}
+            volume_ratio (float): объём последнего бара / SMA_20 объёма (фильтр подтверждения)
 
     Исключения:
         FileNotFoundError: если веса ансамбля для тикера не найдены.
@@ -146,6 +147,10 @@ async def predict_signal(
     confidence = float(proba[predicted_class])
     signal = LABEL_NAMES[predicted_class]
 
+    # volume_ratio последнего бара: используется как фильтр подтверждения в scheduler
+    # > 1.0 — объём выше среднего (движение подтверждено), < 1.0 — слабый объём
+    last_volume_ratio = float(feat_df["volume_ratio"].iloc[-1]) if "volume_ratio" in feat_df.columns else 1.0
+
     result = {
         "ticker": ticker,
         "signal": signal,
@@ -154,6 +159,7 @@ async def predict_signal(
             name: round(float(p), 4)
             for name, p in zip(LABEL_NAMES, proba)
         },
+        "volume_ratio": round(last_volume_ratio, 4),
     }
 
     logger.info(
@@ -161,6 +167,7 @@ async def predict_signal(
         ticker=ticker,
         signal=signal,
         confidence=round(confidence, 4),
+        volume_ratio=round(last_volume_ratio, 4),
     )
 
     # ── Redis: сохраняем в кеш ────────────────────────────────────────────────
