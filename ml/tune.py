@@ -126,6 +126,9 @@ def tune_lgbm(
             "min_child_samples": trial.suggest_int("min_child_samples", 10, 50),
             "random_state": ml_settings.random_state,
             "verbose": -1,
+            # Балансировка классов: HOLD доминирует (60–80%), без этого модель
+            # выучивает "всегда HOLD" и F1_macro падает к случайному уровню ~0.33
+            "class_weight": "balanced",
         }
         model = Pipeline([("scaler", StandardScaler()), ("model", lgb.LGBMClassifier(**params))])
         return _cv_f1_score(model, X, y, cv)
@@ -144,6 +147,7 @@ def tune_lgbm(
         "num_class": 3,
         "random_state": ml_settings.random_state,
         "verbose": -1,
+        "class_weight": "balanced",
     })
 
     logger.info(
@@ -256,6 +260,8 @@ def tune_random_forest(
             "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 10),
             "random_state": ml_settings.random_state,
             "n_jobs": -1,
+            # Балансировка классов: аналогично LightGBM
+            "class_weight": "balanced",
         }
         model = Pipeline([("scaler", StandardScaler()), ("model", RandomForestClassifier(**params))])
         return _cv_f1_score(model, X, y, cv)
@@ -269,7 +275,7 @@ def tune_random_forest(
     )
 
     best_params = study.best_params
-    best_params.update({"random_state": ml_settings.random_state, "n_jobs": -1})
+    best_params.update({"random_state": ml_settings.random_state, "n_jobs": -1, "class_weight": "balanced"})
 
     logger.info(
         "RandomForest tuning complete",
@@ -278,6 +284,79 @@ def tune_random_forest(
     )
 
     _save_params(best_params, f"best_params_rf_{version}.json")
+    return best_params
+
+
+# ── CatBoost ──────────────────────────────────────────────────────────────────
+
+def tune_catboost(
+    X: pd.DataFrame,
+    y: pd.Series,
+    n_trials: int | None = None,
+    version: str | None = None,
+) -> dict:
+    """
+    Подобрать гиперпараметры CatBoost через Optuna.
+
+    Аргументы:
+        X:        DataFrame признаков.
+        y:        Series меток (0, 1, 2).
+        n_trials: количество итераций (None = из ml_settings).
+        version:  версия для имени файла (None = из ml_settings).
+
+    Возвращает:
+        Словарь лучших гиперпараметров.
+    """
+    from catboost import CatBoostClassifier  # ленивый импорт — catboost опциональная зависимость
+
+    n_trials = n_trials or ml_settings.optuna_trials_catboost
+    version = version or ml_settings.model_version
+    cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
+
+    def objective(trial: optuna.Trial) -> float:
+        params = {
+            "iterations": trial.suggest_int("iterations", 200, 1000),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            "depth": trial.suggest_int("depth", 4, 10),
+            "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 10.0),
+            # subsample поддерживается только при bootstrap_type="Bernoulli" или "MVS"
+            # (по умолчанию "Bayesian" не поддерживает subsample → CatBoostError)
+            "bootstrap_type": "Bernoulli",
+            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            "random_strength": trial.suggest_float("random_strength", 0.1, 10.0, log=True),
+            "random_seed": ml_settings.random_state,
+            "verbose": 0,
+            # CatBoost поддерживает балансировку классов нативно
+            "auto_class_weights": "Balanced",
+            "loss_function": "MultiClass",
+        }
+        model = Pipeline([("scaler", StandardScaler()), ("model", CatBoostClassifier(**params))])
+        return _cv_f1_score(model, X, y, cv)
+
+    study = optuna.create_study(direction="maximize")
+    study.optimize(
+        objective,
+        n_trials=n_trials,
+        show_progress_bar=False,
+        callbacks=[_make_progress_callback(n_trials, "CatBoost HPO")],
+    )
+
+    best_params = study.best_params
+    best_params.update({
+        "bootstrap_type": "Bernoulli",
+        "random_seed": ml_settings.random_state,
+        "verbose": 0,
+        "auto_class_weights": "Balanced",
+        "loss_function": "MultiClass",
+    })
+
+    logger.info(
+        "CatBoost tuning complete",
+        best_f1=round(study.best_value, 4),
+        best_params=best_params,
+    )
+
+    _save_params(best_params, f"best_params_catboost_{version}.json")
     return best_params
 
 

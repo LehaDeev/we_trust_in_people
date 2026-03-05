@@ -117,6 +117,7 @@ class MLSettings(BaseSettings):
     optuna_trials_lgbm: int = Field(50, alias="ML_OPTUNA_TRIALS_LGBM")
     optuna_trials_xgb: int = Field(50, alias="ML_OPTUNA_TRIALS_XGB")
     optuna_trials_rf: int = Field(30, alias="ML_OPTUNA_TRIALS_RF")
+    optuna_trials_catboost: int = Field(30, alias="ML_OPTUNA_TRIALS_CATBOOST")
 
     # Минимум свечей для инференса (50 прогрев + 200 буфер)
     min_candles_predict: int = Field(250, alias="ML_MIN_CANDLES_PREDICT")

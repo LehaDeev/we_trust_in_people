@@ -6,7 +6,7 @@
     2. Вычисление признаков (TA-Lib индикаторы)
     3. Генерация меток по будущей доходности
     4. Подбор гиперпараметров через Optuna (с кешем best_params_*_{ticker}_{version}.json)
-    5. Обучение финального ансамбля (LightGBM + XGBoost + RandomForest)
+    5. Обучение ансамбля VotingClassifier(soft) — LightGBM + RandomForest
     6. Сохранение весов в ml/weights/ensemble_{ticker}_{version}.pkl
 
 Запуск:
@@ -22,7 +22,6 @@ from pathlib import Path
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
-import xgboost as xgb
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.pipeline import Pipeline
@@ -32,7 +31,7 @@ from config.settings import data_settings, ml_settings
 from ml.dataset import load_all_tickers_dataset
 from ml.features import FEATURE_COLUMNS, compute_features
 from ml.labels import LABEL_NAMES, create_labels
-from ml.tune import tune_lgbm, tune_random_forest, tune_xgboost
+from ml.tune import tune_lgbm, tune_random_forest
 from utils.logger import logger
 
 WEIGHTS_DIR = Path(__file__).parent / "weights"
@@ -229,23 +228,26 @@ def _train_single_ticker(
         return _get_params(model_name, ticker_version, tune_fn, X, y, force_tune)
 
     lgbm_params = _get_with_display("lgbm", tune_lgbm)
-    xgb_params  = _get_with_display("xgboost", tune_xgboost)
     rf_params   = _get_with_display("rf", tune_random_forest)
 
-    # Каждая модель обёрнута в Pipeline со StandardScaler:
-    # - деревья инвариантны к масштабу → скейлер не меняет их результат
-    # - при добавлении SVM/MLP в будущем масштабирование уже встроено
-    # - скейлер сохраняется внутри .pkl вместе с моделью — ничего дополнительно сохранять не нужно
+    # Балансировка классов — фиксированный параметр, не из HPO-кеша.
+    # Без него модели выучивают "всегда HOLD" → F1_macro ≈ 0.33 (случайный уровень).
+    lgbm_params["class_weight"] = "balanced"
+    rf_params["class_weight"] = "balanced"
+
+    # Каждая базовая модель обёрнута в Pipeline со StandardScaler.
+    # VotingClassifier(voting='soft') усредняет предсказанные вероятности базовых моделей.
+    # StackingClassifier не подходит для временных рядов: его внутренний cv=StratifiedKFold
+    # перемешивает данные → утечка будущего в OOF → мета-модель деградирует на TimeSeriesSplit.
     def _scaled(name: str, model) -> tuple:
         return (name, Pipeline([("scaler", StandardScaler()), ("model", model)]))
 
     ensemble = VotingClassifier(
         estimators=[
             _scaled("lgbm", lgb.LGBMClassifier(**lgbm_params)),
-            _scaled("xgb", xgb.XGBClassifier(**xgb_params)),
             _scaled("rf", RandomForestClassifier(**rf_params)),
         ],
-        voting="soft",
+        voting="soft",  # усреднение вероятностей, а не голосование классами
     )
 
     _print_step("CV оценка ансамбля...")

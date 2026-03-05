@@ -37,8 +37,7 @@ lightgbm==4.5.0
 xgboost==2.1.4
 optuna==4.2.1
 TA-Lib==0.6.8
-# catboost — добавить позже на этапе ML (нет wheel для Python 3.13)
-# pip install catboost  # или использовать Python 3.11 окружение
+# catboost>=1.2  # опционально: tune_catboost() в ml/tune.py (не используется в ансамбле — слишком медленный на CPU)
 
 # Data visualization (optional, for analysis notebooks)
 matplotlib==3.9.4

@@ -7,7 +7,7 @@
 
 - **Tinkoff Invest API** — асинхронная интеграция, боевой режим, rate limiter
 - **Сбор рыночных данных** — исторические свечи по списку тикеров, инкрементальное обновление
-- **ML-ансамбль** — отдельный LightGBM + XGBoost + RandomForest для каждого тикера, Optuna HPO, сигналы BUY / SELL / HOLD; каждая модель обёрнута в `Pipeline(StandardScaler)` для поддержки масштабо-зависимых алгоритмов в будущем
+- **ML-стекинг** — отдельный ансамбль LightGBM + RandomForest → LogisticRegression для каждого тикера, Optuna HPO, сигналы BUY / SELL / HOLD; мета-модель обучается на out-of-fold предсказаниях базовых моделей через `StackingClassifier`
 - **Ночное дообучение** — каждую ночь инкрементально собирает новые свечи и переобучает модели на свежих данных
 - **Redis-кеш** — свечи, цены, портфель, сигналы; graceful degradation при недоступности Redis
 - **Telegram-бот** — полностью inline-интерфейс (без ReplyKeyboard)
@@ -28,7 +28,7 @@
 | База данных | PostgreSQL + SQLAlchemy 2.x async + asyncpg |
 | Миграции | Alembic |
 | Кеш | Redis (`redis[asyncio]`) |
-| ML | LightGBM, XGBoost, scikit-learn, TA-Lib, Optuna |
+| ML | LightGBM, scikit-learn, TA-Lib, Optuna |
 | Брокер | t-tech-investments (Tinkoff Invest API gRPC) |
 | Логирование | structlog |
 | Агенты | Anthropic API (claude-opus-4-6) |
@@ -94,7 +94,7 @@ we_trust_in_people/
 │   ├── features.py          # Feature engineering (TA-Lib индикаторы)
 │   ├── dataset.py           # Загрузка данных из БД (кеш Redis)
 │   ├── train.py             # Обучение per-ticker ансамблей + Optuna HPO + прогресс в терминале
-│   ├── tune.py              # Optuna HPO для LightGBM / XGBoost / RandomForest (с progress bar)
+│   ├── tune.py              # Optuna HPO для LightGBM / CatBoost / RandomForest (с progress bar)
 │   ├── predict.py           # Инференс, predict_all() (кеш Redis)
 │   └── weights/             # Веса моделей (не в репозитории): ensemble_{ticker}_{version}.pkl
 ├── trading/
@@ -155,11 +155,10 @@ we_trust_in_people/
 | Переменная | Описание | По умолчанию |
 |---|---|---|
 | `ML_MODEL_VERSION` | Суффикс файлов весов | `v2` |
-| `ML_LOOKAHEAD` | Свечей вперёд для генерации меток | `4` |
-| `ML_THRESHOLD` | Порог доходности ±% для BUY/SELL | `0.01` |
+| `ML_LOOKAHEAD` | Свечей вперёд для генерации меток | `8` |
+| `ML_THRESHOLD` | Порог доходности ±% для BUY/SELL | `0.007` |
 | `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `50` |
-| `ML_OPTUNA_TRIALS_XGB` | Итераций Optuna для XGBoost | `30` |
-| `ML_OPTUNA_TRIALS_RF` | Итераций Optuna для RandomForest | `20` |
+| `ML_OPTUNA_TRIALS_RF` | Итераций Optuna для RandomForest | `30` |
 | `ML_FORCE_TUNE` | Принудительный перезапуск Optuna | `false` |
 
 ### Ночное дообучение
@@ -190,8 +189,7 @@ we_trust_in_people/
   [1/3] SBER  (12450 строк)
 ════════════════════════════════════════════════════════
     LightGBM HPO   [████████████████████]  50/ 50 | best F1=0.4821
-    XGBoost HPO    [████████████████████]  30/ 30 | best F1=0.4703
-    RandomForest HPO [████████████████████]  20/ 20 | best F1=0.4612
+    RandomForest HPO [████████████████████]  30/ 30 | best F1=0.4612
   ▶ CV оценка ансамбля... ✓  F1=0.4891
   ▶ Финальное обучение ансамбля... ✓
   Сохранено: ensemble_SBER_v2.pkl
@@ -209,7 +207,7 @@ we_trust_in_people/
 
 ### ML-признаки
 
-Все 20 признаков нормализованы — не зависят от абсолютного уровня цены тикера.
+Все 40 признаков нормализованы — не зависят от абсолютного уровня цены тикера.
 Это обеспечивает стационарность и корректное дообучение при росте или падении цены со временем.
 
 | Группа | Признак | Описание |
@@ -220,29 +218,50 @@ we_trust_in_people/
 | Импульс | `RSI_14` | Осциллятор перекупленности/перепроданности |
 | Импульс | `MACD`, `MACD_signal`, `MACD_hist` | MACD-индикатор |
 | Импульс | `ROC_10` | Темп изменения цены за 10 свечей |
+| Импульс | `MFI_14` | Money Flow Index — RSI с учётом объёма [0–100] |
+| Импульс | `stoch_k`, `stoch_d` | Stochastic медленный %K/%D — позиция цены в диапазоне [0–100] |
 | Волатильность | `bb_pct_b` | Bollinger %B: позиция в полосах [0 = нижняя, 1 = верхняя] |
 | Волатильность | `atr_ratio` | `ATR_14 / close` — волатильность как % от цены |
 | Волатильность | `BB_width` | `(BB_upper − BB_lower) / BB_mid` — ширина полос |
+| Волатильность | `hist_vol_20` | Скользящее std доходностей за 20 баров — историческая волатильность |
 | Объём | `OBV` | On-Balance Volume |
 | Объём | `VOLUME_SMA_20` | Скользящее среднее объёма |
 | Объём | `volume_ratio` | `volume / VOLUME_SMA_20` — повышенный объём > 1 |
+| Объём | `cmf_20` | Chaikin Money Flow: покупательское давление по объёму за 20 баров |
+| Объём | `volume_change_1h`, `volume_change_4h` | Изменение объёма за 1/4 бара — предвестник ценового движения |
 | Производные | `close_sma20_ratio`, `close_sma50_ratio` | Цена относительно SMA |
 | Производные | `high_low_ratio` | `(high − low) / close` — диапазон бара |
 | Производные | `sma20_sma50_ratio` | > 1 = золотой крест (бычий), < 1 = мёртвый крест |
+| Производные | `vwap_ratio` | `close / VWAP` — цена относительно объёмно-взвешенной средней дня |
+| Структура свечи | `body_ratio` | `(close − open) / (high − low)` — > 0 бычья, < 0 медвежья |
+| Структура свечи | `upper_shadow`, `lower_shadow` | Размер верхней/нижней тени — отверженные уровни |
+| Структура свечи | `gap` | `(open − prev_close) / prev_close` — гэп при открытии |
+| Лаговые доходности | `return_1h`, `return_4h`, `return_8h`, `return_24h` | `pct_change(N)` — прямой сигнал импульса; один из сильнейших предикторов |
+| Временные | `hour_sin`, `hour_cos` | Циклическое кодирование часа МСК (23:00 и 00:00 — соседние точки) |
+| Временные | `dayofweek_sin`, `dayofweek_cos` | Циклическое кодирование дня недели (0=Пн, 4=Пт) |
 
-### StandardScaler Pipeline
+### Архитектура ансамбля
 
-Каждая из трёх моделей ансамбля обёрнута в `sklearn.pipeline.Pipeline`:
+Ансамбль использует `VotingClassifier(voting='soft')` — усреднение вероятностей базовых моделей.
+Каждая базовая модель обёрнута в `Pipeline(StandardScaler)`:
 
 ```python
-Pipeline([("scaler", StandardScaler()), ("model", LGBMClassifier(...))])
+VotingClassifier(
+    estimators=[
+        Pipeline([("scaler", StandardScaler()), ("model", LGBMClassifier(...))]),
+        Pipeline([("scaler", StandardScaler()), ("model", RandomForestClassifier(...))]),
+    ],
+    voting="soft",  # усреднение вероятностей, а не голосование классами
+)
 ```
 
-Scaler сохраняется внутри `.pkl`-файла вместе с моделью. Код инференса (`predict.py`)
-не требует изменений при добавлении новых масштабо-зависимых алгоритмов.
+`StackingClassifier` не подходит для временных рядов: его внутренний `cv=StratifiedKFold`
+перемешивает данные → утечка будущего в OOF → мета-модель деградирует на честном `TimeSeriesSplit`.
+Весь ансамбль сохраняется в одном `.pkl` файле.
 
-> **Важно:** после изменения набора признаков или структуры Pipeline необходимо
-> удалить старые `.pkl` и запустить `python -m scripts.train_model --force-tune`.
+> **Важно:** после изменения набора признаков или структуры стекинга необходимо
+> удалить старые `.pkl` и `best_params_*.json`, затем запустить
+> `python -m scripts.train_model --force-tune`.
 
 ### Redis
 
