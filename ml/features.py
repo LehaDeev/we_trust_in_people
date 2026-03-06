@@ -8,12 +8,16 @@
 уровня цены тикера. Это обеспечивает стационарность признаков и корректное
 дообучение при росте или падении цены со временем.
 
-Группы признаков (40 признаков):
+Группы признаков (52 признака):
     - Тренд: SMA, нормализованные EMA, ADX
-    - Импульс: RSI, MACD, ROC, MFI, Stochastic %K/%D
+    - Импульс: RSI, MACD, ROC, MFI, Stochastic %K/%D, CCI, Aroon Up/Down
+    - Импульс (дельты): изменение RSI/Stoch/MACD_hist за 4 бара — направление индикатора
     - Волатильность: Bollinger %B, ATR-ratio, ширина Bollinger, историческая волатильность
     - Объём: OBV, нормализованный объём, volume_ratio, CMF, изменения объёма
     - Ценовые отношения: close/SMA, high-low/close, SMA20/SMA50, VWAP-ratio
+    - Экстремумы: позиция цены относительно 52-недельных max/min
+    - Donchian: позиция и ширина канала за 20 баров (breakout детектор)
+    - Роллинг: среднее и std доходностей за 8 баров (краткосрочный режим)
     - Структура свечи: body_ratio, upper/lower shadow, gap при открытии
     - Лаговые доходности: 1h, 4h, 8h, 24h (прямой сигнал импульса)
     - Временные: час дня и день недели (синус/косинус — циклическое кодирование)
@@ -30,6 +34,13 @@ FEATURE_COLUMNS: list[str] = [
     "RSI_14", "MACD", "MACD_signal", "MACD_hist", "ROC_10",
     # MFI = RSI с учётом объёма; Stochastic %K/%D — перекупленность/перепроданность
     "MFI_14", "stoch_k", "stoch_d",
+    # CCI: отклонение цены от статистической нормы (дополняет RSI другой формулой)
+    "CCI_14",
+    # Aroon: сколько баров назад был максимум/минимум → сила и направление тренда
+    "aroon_up", "aroon_down",
+    # Дельты индикаторов за 4 бара: направление изменения важнее абсолютного значения
+    # RSI пробивает 50 снизу вверх → сильнее чем просто RSI=52
+    "rsi_delta_4h", "stoch_k_delta_4h", "macd_hist_delta_4h",
     # ── Волатильность (нормализованные) ──────────────────────────────────────
     "bb_pct_b", "atr_ratio", "BB_width",
     # Историческая волатильность: скользящее std доходностей за 20 баров
@@ -42,6 +53,14 @@ FEATURE_COLUMNS: list[str] = [
     "close_sma20_ratio", "close_sma50_ratio", "high_low_ratio", "sma20_sma50_ratio",
     # VWAP-ratio: где цена относительно средневзвешенной по объёму цены дня
     "vwap_ratio",
+    # 52-недельные экстремумы: режим рынка (у максимума = импульс, у минимума = перепродан)
+    "high_252_ratio", "low_252_ratio",
+    # Donchian channel: позиция цены в 20-барном диапазоне + ширина канала
+    # donchian_pct=1.0 → пробой вверх (breakout), 0.0 → пробой вниз
+    "donchian_pct", "donchian_width",
+    # Роллинговые статистики доходностей за 8 баров
+    # mean > 0 = краткосрочный восходящий тренд; std = мини-волатильность
+    "return_mean_8h", "return_std_8h",
     # ── Структура свечи ───────────────────────────────────────────────────────
     # body_ratio > 0 — бычья свеча, < 0 — медвежья; тени показывают отверженные уровни
     "body_ratio", "upper_shadow", "lower_shadow", "gap",
@@ -110,6 +129,22 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     )
     df["stoch_k"] = slowk
     df["stoch_d"] = slowd
+    # CCI: отклонение типичной цены от скользящего среднего, нормализованное на MAD
+    # Выше +100 = перекуплен, ниже -100 = перепродан; дополняет RSI другой формулой
+    df["CCI_14"] = talib.CCI(high, low, close, timeperiod=14)
+    # Aroon: Up показывает сколько баров назад был максимум (0–100), Down — минимум
+    # Aroon Up > 70 и Down < 30 → сильный восходящий тренд
+    aroon_down, aroon_up = talib.AROON(high, low, timeperiod=14)
+    df["aroon_up"]   = aroon_up
+    df["aroon_down"] = aroon_down
+    # Дельты индикаторов: направление изменения за 4 бара важнее абсолютного значения.
+    # RSI пробивает 50 снизу вверх → сигнал смены тренда сильнее чем просто RSI=52.
+    rsi_series        = pd.Series(talib.RSI(close, timeperiod=14))
+    stoch_k_series    = pd.Series(slowk)
+    macd_hist_series  = pd.Series(macd_hist)
+    df["rsi_delta_4h"]       = (rsi_series - rsi_series.shift(4)).values
+    df["stoch_k_delta_4h"]   = (stoch_k_series - stoch_k_series.shift(4)).values
+    df["macd_hist_delta_4h"] = (macd_hist_series - macd_hist_series.shift(4)).values
 
     # ── Индикаторы волатильности ─────────────────────────────────────────────
     bb_upper, bb_mid, bb_lower = talib.BBANDS(
@@ -173,6 +208,36 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     vwap = df["_cumtp"] / df["_cumvol"]
     df["vwap_ratio"] = np.where(vwap != 0, close / vwap, np.nan)
     df.drop(columns=["_tp_vol", "_vol", "_date", "_cumtp", "_cumvol"], inplace=True)
+
+    # ── 52-недельные экстремумы ───────────────────────────────────────────────
+    # Показывают режим рынка: у исторического максимума → импульс/перекупленность,
+    # у минимума → перепроданность/разворот.
+    # 252 бара ≈ 52 недели при 1h-свечах (250 торговых дней × ~7 часов / 7 ≈ 250 баров).
+    # Для полноценного 52w нужно 252*7≈1764 баров — используем доступные данные rolling.
+    close_s = pd.Series(close)
+    high_252 = close_s.rolling(252, min_periods=50).max()
+    low_252  = close_s.rolling(252, min_periods=50).min()
+    df["high_252_ratio"] = np.where(high_252 != 0, close / high_252, np.nan)
+    df["low_252_ratio"]  = np.where(low_252  != 0, close / low_252,  np.nan)
+
+    # ── Donchian channel ──────────────────────────────────────────────────────
+    # Breakout детектор: пробой 20-барного максимума/минимума.
+    # donchian_pct = 1.0 → цена у верхней границы канала (бычий пробой),
+    # donchian_pct = 0.0 → цена у нижней границы (медвежий пробой).
+    high_s = pd.Series(high)
+    low_s  = pd.Series(low)
+    don_high  = high_s.rolling(20).max().values
+    don_low   = low_s.rolling(20).min().values
+    don_range = don_high - don_low
+    df["donchian_pct"]   = np.where(don_range != 0, (close - don_low) / don_range, np.nan)
+    df["donchian_width"] = np.where(close != 0, don_range / close, np.nan)
+
+    # ── Роллинговые статистики доходностей ───────────────────────────────────
+    # return_mean_8h > 0 = краткосрочный восходящий тренд доходностей;
+    # return_std_8h = мини-волатильность (дополняет hist_vol_20 на коротком горизонте).
+    returns_8h = pd.Series(close).pct_change()
+    df["return_mean_8h"] = returns_8h.rolling(8).mean().values
+    df["return_std_8h"]  = returns_8h.rolling(8).std().values
 
     # ── Структура свечи ───────────────────────────────────────────────────────
     # Нормализованы относительно диапазона high-low свечи.
