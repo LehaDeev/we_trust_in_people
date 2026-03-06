@@ -122,6 +122,18 @@ class MLSettings(BaseSettings):
     # Минимум свечей для инференса (50 прогрев + 200 буфер)
     min_candles_predict: int = Field(250, alias="ML_MIN_CANDLES_PREDICT")
 
+    # Отбор признаков per-ticker по нормализованной importance.
+    # После быстрого фита на всех признаках удаляются признаки с importance < порога.
+    # Каждый тикер получает свой набор и сохраняет его в features_{ticker}_{version}.json.
+    # Инференс автоматически использует тикерный набор.
+    # 0.0 = отключить отбор (использовать все признаки).
+    feature_importance_threshold: float = Field(0.01, alias="ML_FEATURE_IMPORTANCE_THRESHOLD")
+
+    # Выводить таблицу важности признаков после обучения каждого тикера.
+    # Полезно при ручном запуске train_model для анализа. При работе бота
+    # (ночное переобучение) вывод не нужен — установить в false.
+    print_feature_importance: bool = Field(False, alias="ML_PRINT_FEATURE_IMPORTANCE")
+
     # Принудительный повтор Optuna при следующем запуске обучения.
     # true — игнорировать кеш best_params_*.json и запустить HPO заново.
     # После использования вернуть в false, иначе HPO будет запускаться каждый раз.

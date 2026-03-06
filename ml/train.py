@@ -190,6 +190,76 @@ def _evaluate_ensemble(
     return mean_f1
 
 
+# ── Feature importance ───────────────────────────────────────────────────────
+
+def _avg_importance(
+    ensemble: VotingClassifier,
+    feature_names: list[str],
+) -> dict[str, float]:
+    """
+    Вычислить нормализованную важность признаков — среднее по всем моделям ансамбля.
+
+    LightGBM считает сплиты (сотни), RF — долю Gini (0–1).
+    Каждая модель нормализуется к сумме=1 перед усреднением,
+    чтобы LightGBM не доминировал из-за больших абсолютных значений.
+
+    Возвращает:
+        Словарь {feature_name: avg_importance}.
+    """
+    raw_per_model: list[dict[str, float]] = []
+    for fitted_pipeline in ensemble.estimators_:
+        model = fitted_pipeline.named_steps["model"]
+        if not hasattr(model, "feature_importances_"):
+            continue
+        raw = dict(zip(feature_names, model.feature_importances_.astype(float)))
+        total = sum(raw.values()) or 1.0
+        raw_per_model.append({f: v / total for f, v in raw.items()})
+
+    if not raw_per_model:
+        return {f: 0.0 for f in feature_names}
+
+    return {
+        f: sum(m.get(f, 0.0) for m in raw_per_model) / len(raw_per_model)
+        for f in feature_names
+    }
+
+
+def _select_by_threshold(
+    ensemble: VotingClassifier,
+    feature_names: list[str],
+    threshold: float,
+) -> list[str]:
+    """
+    Выбрать признаки с нормализованной importance >= threshold.
+
+    Порядок сохраняется из feature_names (по убыванию importance внутри).
+    Если threshold <= 0 или все признаки ниже порога — вернуть все признаки.
+    """
+    if threshold <= 0.0:
+        return list(feature_names)
+
+    avg_imp = _avg_importance(ensemble, feature_names)
+    selected = [f for f in feature_names if avg_imp[f] >= threshold]
+    # Фолбэк: если порог слишком высокий и отфильтровал всё — берём все
+    return selected if selected else list(feature_names)
+
+
+def _print_feature_importance(
+    ensemble: VotingClassifier,
+    feature_names: list[str],
+    ticker: str,
+) -> None:
+    """Вывести все признаки по убыванию нормализованной importance."""
+    avg_imp = _avg_importance(ensemble, feature_names)
+    sorted_feats = sorted(avg_imp.items(), key=lambda x: x[1], reverse=True)
+
+    max_imp = sorted_feats[0][1] if sorted_feats else 1.0
+    print(f"\n  Признаки [{ticker}] по важности:", flush=True)
+    for i, (feat, imp) in enumerate(sorted_feats, 1):
+        bar = "█" * int(imp / max_imp * 30)
+        print(f"    {i:>2}. {feat:<25} {bar} {imp:.4f}", flush=True)
+
+
 # ── Обучение одного тикера ───────────────────────────────────────────────────
 
 def _train_single_ticker(
@@ -239,32 +309,63 @@ def _train_single_ticker(
     # VotingClassifier(voting='soft') усредняет предсказанные вероятности базовых моделей.
     # StackingClassifier не подходит для временных рядов: его внутренний cv=StratifiedKFold
     # перемешивает данные → утечка будущего в OOF → мета-модель деградирует на TimeSeriesSplit.
-    def _scaled(name: str, model) -> tuple:
-        return (name, Pipeline([("scaler", StandardScaler()), ("model", model)]))
+    def _make_ensemble() -> VotingClassifier:
+        def _scaled(name: str, model) -> tuple:
+            return (name, Pipeline([("scaler", StandardScaler()), ("model", model)]))
 
-    ensemble = VotingClassifier(
-        estimators=[
-            _scaled("lgbm", lgb.LGBMClassifier(**lgbm_params)),
-            _scaled("rf", RandomForestClassifier(**rf_params)),
-        ],
-        voting="soft",  # усреднение вероятностей, а не голосование классами
-    )
+        return VotingClassifier(
+            estimators=[
+                _scaled("lgbm", lgb.LGBMClassifier(**lgbm_params)),
+                _scaled("rf", RandomForestClassifier(**rf_params)),
+            ],
+            voting="soft",
+        )
+
+    all_features = X.columns.tolist()
+    threshold = ml_settings.feature_importance_threshold
+
+    # ── Проход 1: быстрый фит на всех признаках → отбор по порогу per-ticker ──
+    # Один фит (без CV) чтобы получить feature importance и отбросить слабые.
+    # Для каждого тикера свой порог отбора — разные признаки могут быть важны
+    # для банков (SBER), нефтяников (LKOH), IT-компаний (YDEX) и т.д.
+    # CV-оценка и финальный фит выполняются уже на отобранных признаках.
+    if threshold > 0.0:
+        _print_step(f"Отбор признаков (проход 1 из 2, порог ≥{threshold})...")
+        probe = _make_ensemble()
+        probe.fit(X, y)
+        selected_features = _select_by_threshold(probe, all_features, threshold)
+        dropped = len(all_features) - len(selected_features)
+        _print_ok(f"{len(selected_features)} из {len(all_features)} признаков (−{dropped})")
+        X_final = X[selected_features]
+    else:
+        # Отбор отключён — берём все признаки
+        selected_features = all_features
+        X_final = X
+
+    # ── Проход 2: CV + финальный фит на отобранных признаках ─────────────────
+    ensemble = _make_ensemble()
 
     _print_step("CV оценка ансамбля...")
-    cv_f1 = _evaluate_ensemble(ensemble, X, y, ticker)
+    cv_f1 = _evaluate_ensemble(ensemble, X_final, y, ticker)
     _print_ok(f"F1={cv_f1:.4f}")
 
     _print_step("Финальное обучение ансамбля...")
-    ensemble.fit(X, y)
+    ensemble.fit(X_final, y)
     _print_ok()
+
+    if ml_settings.print_feature_importance:
+        _print_feature_importance(ensemble, selected_features, ticker)
 
     ensemble_path = WEIGHTS_DIR / f"ensemble_{ticker_version}.pkl"
     features_path = WEIGHTS_DIR / f"features_{ticker_version}.json"
 
     with open(ensemble_path, "wb") as f:
         pickle.dump(ensemble, f)
+    # Сохраняем per-ticker список признаков (не глобальный FEATURE_COLUMNS).
+    # predict.py загружает именно этот файл → инференс автоматически использует
+    # тикерный набор без каких-либо изменений в коде инференса.
     with open(features_path, "w") as f:
-        json.dump(FEATURE_COLUMNS, f, indent=2)
+        json.dump(selected_features, f, indent=2)
 
     print(f"  Сохранено: {ensemble_path.name}", flush=True)
 
