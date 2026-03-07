@@ -1,0 +1,40 @@
+# Виртуальное окружение
+venv/
+.venv/
+
+# Секреты — никогда не в образ
+.env
+
+# Веса моделей — тяжёлые файлы, монтируются как volume
+ml/weights/
+
+# Мусор Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Git
+.git/
+.gitignore
+
+# Данные CatBoost (логи обучения)
+catboost_info/
+
+# Jupyter notebooks
+*.ipynb
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# Тесты и CI
+.pytest_cache/
+.coverage
+htmlcov/

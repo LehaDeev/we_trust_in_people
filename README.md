@@ -159,6 +159,7 @@ we_trust_in_people/
 | `ML_THRESHOLD` | Порог доходности ±% для BUY/SELL | `0.007` |
 | `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `50` |
 | `ML_OPTUNA_TRIALS_ET` | Итераций Optuna для ExtraTreesClassifier | `30` |
+| `ML_OPTUNA_TRIALS_SVC` | Итераций Optuna для SVC (Platt scaling — держать ≤ 20) | `20` |
 | `ML_FEATURE_IMPORTANCE_THRESHOLD` | Порог importance для отбора признаков per-ticker (`0.0` = отключить) | `0.01` |
 | `ML_PRINT_FEATURE_IMPORTANCE` | Выводить таблицу важности признаков после обучения | `false` |
 | `ML_FORCE_TUNE` | Принудительный перезапуск Optuna | `false` |
@@ -190,8 +191,9 @@ we_trust_in_people/
 ════════════════════════════════════════════════════════
   [1/3] SBER  (12450 строк)
 ════════════════════════════════════════════════════════
-    LightGBM HPO   [████████████████████]  50/ 50 | best F1=0.4821
-    RandomForest HPO [████████████████████]  30/ 30 | best F1=0.4612
+    LightGBM HPO      [████████████████████]  50/ 50 | best F1=0.4821
+    ExtraTrees HPO    [████████████████████]  30/ 30 | best F1=0.4612
+    SVC HPO           [████████████████████]  20/ 20 | best F1=0.4401
   ▶ Отбор признаков (проход 1 из 2, порог ≥0.01)... ✓  38 из 52 признаков (−14)
   ▶ CV оценка ансамбля... ✓  F1=0.4891
   ▶ Финальное обучение ансамбля... ✓
@@ -260,7 +262,7 @@ we_trust_in_people/
 
 Обучение проходит в **два прохода**:
 
-1. **Проход 1** — быстрый `fit` ансамбля на всех 52 признаках. Вычисляется нормализованная importance для каждой модели (LightGBM и RandomForest независимо нормализуются к сумме = 1, затем усредняются). Признаки с `avg_importance < ML_FEATURE_IMPORTANCE_THRESHOLD` отбрасываются.
+1. **Проход 1** — быстрый `fit` ансамбля на всех 52 признаках. Вычисляется нормализованная importance для каждой модели (LightGBM и ExtraTrees независимо нормализуются к сумме = 1, затем усредняются; SVC не имеет `feature_importances_` и в этом проходе пропускается). Признаки с `avg_importance < ML_FEATURE_IMPORTANCE_THRESHOLD` отбрасываются.
 
 2. **Проход 2** — CV-оценка и финальный `fit` только на отобранных признаках. Список сохраняется в `features_{ticker}_{version}.json`.
 
@@ -284,6 +286,7 @@ VotingClassifier(
     estimators=[
         Pipeline([("scaler", StandardScaler()), ("model", LGBMClassifier(...))]),
         Pipeline([("scaler", StandardScaler()), ("model", ExtraTreesClassifier(...))]),
+        Pipeline([("scaler", StandardScaler()), ("model", SVC(kernel="rbf", probability=True, ...))]),
     ],
     voting="soft",  # усреднение вероятностей, а не голосование классами
 )
@@ -292,6 +295,12 @@ VotingClassifier(
 **Почему ExtraTrees, а не RandomForest:** ET использует случайные пороги разбиений вместо
 поиска лучшего — корреляция с LightGBM значительно ниже, ансамбль получает реальное разнообразие.
 RandomForest давал эффект хуже каждой модели по отдельности из-за высокой корреляции с LightGBM.
+
+**Почему SVC (RBF):** принципиально иной алгоритм — максимальный зазор в признаковом пространстве.
+Хорошо работает там, где деревья дают нечёткую границу. `probability=True` включает Platt scaling
+для получения вероятностей (нужно для soft voting), из-за чего HPO медленнее — рекомендуется
+`ML_OPTUNA_TRIALS_SVC ≤ 20`. SVC не имеет `feature_importances_` → отбор признаков (проход 1)
+опирается только на LightGBM и ExtraTrees; SVC получает уже отобранные признаки в проходе 2.
 
 `StackingClassifier` не подходит для временных рядов: его внутренний `cv=StratifiedKFold`
 перемешивает данные → утечка будущего в OOF → мета-модель деградирует на честном `TimeSeriesSplit`.
@@ -466,6 +475,64 @@ effective_sl = stop_loss_price - dividend_per_share
 - **Architect** (`agents/architect.py`) — валидирует соответствие спецификации проекта
 
 Требует `ANTHROPIC_API_KEY` в `.env`.
+
+## Docker
+
+### Быстрый старт
+
+```bash
+# 1. Скопировать и заполнить .env
+cp .env.example .env
+# Вписать TINKOFF_TOKEN, TINKOFF_ACCOUNT_ID, TELEGRAM_BOT_TOKEN, POSTGRES_PASSWORD
+
+# 2. Поднять все сервисы (postgres + redis + bot)
+docker compose up -d
+
+# 3. Посмотреть логи бота
+docker compose logs -f bot
+```
+
+При первом запуске `docker-entrypoint.sh` автоматически применяет миграции Alembic (`alembic upgrade head`), затем стартует бота.
+
+### Структура сервисов
+
+| Сервис | Образ | Роль |
+|---|---|---|
+| `postgres` | `postgres:15-alpine` | PostgreSQL (данные в named volume `postgres_data`) |
+| `redis` | `redis:7-alpine` | Redis-кеш (данные в named volume `redis_data`) |
+| `bot` | сборка из `Dockerfile` | Telegram-бот + автоторговля |
+
+Сервисы `postgres` и `redis` имеют healthcheck; бот стартует только после их готовности.
+
+### Веса ML-моделей
+
+Модели обучаются **вне Docker** (обучение тяжёлое, занимает время):
+
+```bash
+# На хосте: собрать данные и обучить модели
+python -m scripts.collect_candles
+python -m scripts.train_model
+
+# Веса уже лежат в ./ml/weights/ — они автоматически монтируются в контейнер:
+# ./ml/weights → /app/ml/weights
+```
+
+Директория `ml/weights/` смонтирована как bind-mount — веса не теряются при пересборке образа.
+
+### Пересборка после изменений кода
+
+```bash
+docker compose up -d --build
+```
+
+### Переменные окружения в Docker
+
+Все переменные берутся из `.env` через `env_file`. Два параметра переопределяются автоматически:
+
+```yaml
+POSTGRES_HOST: postgres   # внутри Docker — имя сервиса, не localhost
+REDIS_HOST: redis
+```
 
 ## Важные ограничения
 
