@@ -26,12 +26,13 @@ from sklearn.ensemble import ExtraTreesClassifier, VotingClassifier
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from sklearn.svm import SVC
 
 from config.settings import data_settings, ml_settings
 from ml.dataset import load_all_tickers_dataset
 from ml.features import FEATURE_COLUMNS, compute_features
 from ml.labels import LABEL_NAMES, create_labels
-from ml.tune import tune_extra_trees, tune_lgbm
+from ml.tune import tune_extra_trees, tune_lgbm, tune_svc
 from utils.logger import logger
 
 WEIGHTS_DIR = Path(__file__).parent / "weights"
@@ -299,16 +300,20 @@ def _train_single_ticker(
 
     lgbm_params = _get_with_display("lgbm", tune_lgbm)
     et_params   = _get_with_display("et", tune_extra_trees)
+    svc_params  = _get_with_display("svc", tune_svc)
 
     # Балансировка классов — фиксированный параметр, не из HPO-кеша.
     # Без него модели выучивают "всегда HOLD" → F1_macro ≈ 0.33 (случайный уровень).
     lgbm_params["class_weight"] = "balanced"
-    et_params["class_weight"] = "balanced"
+    et_params["class_weight"]   = "balanced"
+    svc_params["class_weight"]  = "balanced"
 
     # Каждая базовая модель обёрнута в Pipeline со StandardScaler.
     # VotingClassifier(voting='soft') усредняет предсказанные вероятности базовых моделей.
-    # ExtraTrees использует случайные пороги разбиений — низкая корреляция с LightGBM,
-    # что даёт реальное разнообразие ансамблю в отличие от RandomForest.
+    # Три принципиально разных алгоритма:
+    #   LGBM     — градиентный бустинг деревьев
+    #   ExtraTrees — рандомизированные деревья (случайные пороги), низкая корреляция с LGBM
+    #   SVC RBF  — максимизация отступа в пространстве признаков, не дерево
     # StackingClassifier не подходит для временных рядов: его внутренний cv=StratifiedKFold
     # перемешивает данные → утечка будущего в OOF → мета-модель деградирует на TimeSeriesSplit.
     def _make_ensemble() -> VotingClassifier:
@@ -319,6 +324,7 @@ def _train_single_ticker(
             estimators=[
                 _scaled("lgbm", lgb.LGBMClassifier(**lgbm_params)),
                 _scaled("et", ExtraTreesClassifier(**et_params)),
+                _scaled("svc", SVC(**svc_params)),
             ],
             voting="soft",
         )

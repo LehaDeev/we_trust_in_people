@@ -17,6 +17,7 @@ import optuna
 import pandas as pd
 import xgboost as xgb
 from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.svm import SVC
 from sklearn.metrics import f1_score
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
@@ -288,6 +289,76 @@ def tune_extra_trees(
     )
 
     _save_params(best_params, f"best_params_et_{version}.json")
+    return best_params
+
+
+def tune_svc(
+    X: pd.DataFrame,
+    y: pd.Series,
+    n_trials: int | None = None,
+    version: str | None = None,
+) -> dict:
+    """
+    Подобрать гиперпараметры SVC через Optuna.
+
+    SVC (RBF-ядро) — принципиально иной алгоритм: максимизирует отступ между
+    классами в пространстве признаков, а не строит деревья решений. Даёт
+    реальное разнообразие ансамблю с LGBM и ExtraTrees.
+
+    Внимание: probability=True включает Platt scaling (внутренняя CV SVC),
+    что существенно замедляет обучение. На 7000+ строк каждый трайл занимает
+    ~1–2 минуты — держать ML_OPTUNA_TRIALS_SVC <= 20.
+
+    Аргументы:
+        X:        DataFrame признаков.
+        y:        Series меток (0, 1, 2).
+        n_trials: количество итераций (None = из ml_settings).
+        version:  версия для имени файла (None = из ml_settings).
+
+    Возвращает:
+        Словарь лучших гиперпараметров.
+    """
+    n_trials = n_trials or ml_settings.optuna_trials_svc
+    version = version or ml_settings.model_version
+    cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
+
+    def objective(trial: optuna.Trial) -> float:
+        params = {
+            # C: штраф за ошибку классификации; выше → жёстче границы, меньше → шире отступ
+            "C": trial.suggest_float("C", 0.01, 100.0, log=True),
+            # gamma: ширина RBF-ядра; scale = 1/(n_features * X.var()) — хорошая отправная точка
+            "gamma": trial.suggest_categorical("gamma", ["scale", "auto"]),
+            "kernel": "rbf",
+            "probability": True,   # нужно для soft voting (predict_proba)
+            "class_weight": "balanced",
+            "random_state": ml_settings.random_state,
+        }
+        model = Pipeline([("scaler", StandardScaler()), ("model", SVC(**params))])
+        return _cv_f1_score(model, X, y, cv)
+
+    study = optuna.create_study(direction="maximize")
+    study.optimize(
+        objective,
+        n_trials=n_trials,
+        show_progress_bar=False,
+        callbacks=[_make_progress_callback(n_trials, "SVC HPO")],
+    )
+
+    best_params = study.best_params
+    best_params.update({
+        "kernel": "rbf",
+        "probability": True,
+        "class_weight": "balanced",
+        "random_state": ml_settings.random_state,
+    })
+
+    logger.info(
+        "SVC tuning complete",
+        best_f1=round(study.best_value, 4),
+        best_params=best_params,
+    )
+
+    _save_params(best_params, f"best_params_svc_{version}.json")
     return best_params
 
 

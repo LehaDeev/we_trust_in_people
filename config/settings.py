@@ -117,6 +117,8 @@ class MLSettings(BaseSettings):
     optuna_trials_lgbm: int = Field(50, alias="ML_OPTUNA_TRIALS_LGBM")
     optuna_trials_xgb: int = Field(50, alias="ML_OPTUNA_TRIALS_XGB")
     optuna_trials_et: int = Field(30, alias="ML_OPTUNA_TRIALS_ET")
+    # SVC медленнее деревьев из-за Platt scaling — держать <= 20 трайлов
+    optuna_trials_svc: int = Field(20, alias="ML_OPTUNA_TRIALS_SVC")
     optuna_trials_catboost: int = Field(30, alias="ML_OPTUNA_TRIALS_CATBOOST")
 
     # Минимум свечей для инференса (50 прогрев + 200 буфер)
