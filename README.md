@@ -6,17 +6,12 @@
 ## Возможности
 
 - **Tinkoff Invest API** — асинхронная интеграция, боевой режим, rate limiter
-- **Сбор рыночных данных** — исторические свечи по списку тикеров, инкрементальное обновление
-- **ML-ансамбль** — отдельный `VotingClassifier(soft)` LightGBM + ExtraTrees + SVC для каждого тикера, Optuna HPO, сигналы BUY / SELL / HOLD; 2-проходное обучение с per-ticker отбором признаков
-- **Ночное дообучение** — каждую ночь инкрементально собирает новые свечи и переобучает модели
-- **Redis-кеш** — свечи, цены, портфель, сигналы; graceful degradation при недоступности Redis
-- **Telegram-бот** — полностью inline-интерфейс (без ReplyKeyboard)
+- **ML-ансамбль** — `VotingClassifier(soft)`: LightGBM + ExtraTrees + SVC, Optuna HPO, per-ticker отбор признаков → [подробнее](docs/ml.md)
+- **Ночное дообучение** — инкрементальный сбор свечей и переобучение моделей каждую ночь
+- **Автоторговля** — рыночные ордера по ML-сигналам, SL/TP, дивидендная защита → [подробнее](docs/trading.md)
+- **Ручная торговля** — покупка/продажа через Telegram с расчётом P&L и подтверждением
 - **Портфель** — сводка по счёту + детализация по категориям (акции / облигации / ETF / валюта)
-- **Автоторговля** — рыночные ордера по ML-сигналам, стоп-лосс, тейк-профит
-- **Дивидендная защита SL** — автоматический сдвиг стоп-лосса в экс-дивидендный день
-- **Ручная торговля** — покупка/продажа через Telegram с проверкой баланса
-- **FIFO при продаже** — закрывается самая ранняя позиция по каждому активу
-- **Расчёт рентабельности** — чистый P&L с учётом комиссий брокера и НДФЛ
+- **Redis-кеш** — свечи, цены, портфель, сигналы; graceful degradation при недоступности
 - **3-агентная система** — Coder / Reviewer / Architect через Anthropic API
 
 ## Технологический стек
@@ -31,7 +26,6 @@
 | ML | LightGBM, scikit-learn, TA-Lib, Optuna |
 | Брокер | t-tech-investments (Tinkoff Invest API gRPC) |
 | Логирование | structlog |
-| Агенты | Anthropic API (claude-opus-4-6) |
 
 ## Быстрый старт
 
@@ -42,499 +36,66 @@ git clone https://github.com/LehaDeev/we_trust_in_people.git
 cd we_trust_in_people
 
 cp .env.example .env
-# Вписать в .env:
-#   TINKOFF_TOKEN, TINKOFF_ACCOUNT_ID
-#   TELEGRAM_BOT_TOKEN
-#   POSTGRES_PASSWORD
+# Вписать в .env: TINKOFF_TOKEN, TINKOFF_ACCOUNT_ID, TELEGRAM_BOT_TOKEN, POSTGRES_PASSWORD
 ```
+
+Полный список переменных — в [docs/settings.md](docs/settings.md).
 
 ### 2. Обучить ML-модели (на хосте, вне Docker)
 
-Обучение ресурсоёмкое — выполняется один раз на хосте, веса монтируются в контейнер.
-
 ```bash
-# Установить зависимости (URL реестра TBank прописан в requirements.txt)
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
 pip install -r requirements.txt
 
-# Собрать исторические данные
-python -m scripts.collect_candles
-
-# Обучить ансамбли (LightGBM + ExtraTrees + SVC) для каждого тикера
-python -m scripts.train_model
-# При повторном запуске HPO пропускается — используются кешированные best_params_*.json
-# Для принудительного повтора Optuna: python -m scripts.train_model --force-tune
-#
-# --force-tune ОБЯЗАТЕЛЕН после:
-#   - изменения набора признаков (features.py)
-#   - изменения структуры модели (Pipeline, estimator)
-#   - удаления старых файлов best_params_*.json
+python -m scripts.collect_candles   # собрать исторические данные
+python -m scripts.train_model       # обучить ансамбли для каждого тикера
 ```
 
 Веса сохраняются в `ml/weights/` — Docker монтирует эту директорию автоматически.
+Подробнее об обучении: [docs/ml.md](docs/ml.md).
 
 ### 3. Запустить через Docker Compose
 
 ```bash
 docker compose up -d
-
-# Логи бота
 docker compose logs -f bot
 ```
 
-При первом запуске `docker-entrypoint.sh` применяет миграции Alembic, затем стартует бот.
-PostgreSQL и Redis поднимаются вместе; бот ждёт их healthcheck перед стартом.
-
-### Пересборка после изменений кода
-
-```bash
-docker compose up -d --build
-```
-
----
-
-## ML-система
-
-### Архитектура ансамбля
-
-Для каждого тикера обучается отдельный `VotingClassifier(voting='soft')` — усреднение вероятностей.
-Каждая базовая модель обёрнута в `Pipeline(StandardScaler)`:
-
-```python
-VotingClassifier(
-    estimators=[
-        Pipeline([("scaler", StandardScaler()), ("model", LGBMClassifier(...))]),
-        Pipeline([("scaler", StandardScaler()), ("model", ExtraTreesClassifier(...))]),
-        Pipeline([("scaler", StandardScaler()), ("model", SVC(kernel="rbf", probability=True, ...))]),
-    ],
-    voting="soft",  # усреднение вероятностей, а не голосование классами
-)
-```
-
-**Почему ExtraTrees, а не RandomForest:** ET использует случайные пороги разбиений вместо
-поиска лучшего — корреляция с LightGBM значительно ниже, ансамбль получает реальное разнообразие.
-RandomForest давал эффект хуже каждой модели по отдельности из-за высокой корреляции с LightGBM.
-
-**Почему SVC (RBF):** принципиально иной алгоритм — максимальный зазор в признаковом пространстве.
-Хорошо работает там, где деревья дают нечёткую границу. `probability=True` включает Platt scaling
-для получения вероятностей (нужно для soft voting), из-за чего HPO медленнее — рекомендуется
-`ML_OPTUNA_TRIALS_SVC ≤ 20`.
-
-`StackingClassifier` не подходит для временных рядов: его внутренний `cv=StratifiedKFold`
-перемешивает данные → утечка будущего в OOF → мета-модель деградирует на честном `TimeSeriesSplit`.
-Весь ансамбль сохраняется в одном `.pkl` файле.
-
-> **Важно:** после изменения набора признаков (`features.py`) или структуры ансамбля
-> необходимо запустить `python -m scripts.train_model --force-tune` —
-> Optuna подберёт гиперпараметры под новый набор признаков.
-
-### Per-ticker отбор признаков
-
-Обучение проходит в **два прохода**:
-
-1. **Проход 1** — быстрый `fit` ансамбля на всех 52 признаках. Вычисляется нормализованная
-   importance для каждой модели (LightGBM и ExtraTrees независимо нормализуются к сумме = 1,
-   затем усредняются; SVC не имеет `feature_importances_` и пропускается). Признаки с
-   `avg_importance < ML_FEATURE_IMPORTANCE_THRESHOLD` отбрасываются.
-
-2. **Проход 2** — CV-оценка и финальный `fit` только на отобранных признаках. Список
-   сохраняется в `features_{ticker}_{version}.json`.
-
-Каждый тикер получает **свой** набор признаков:
-
-```
-features_SBER_v2.json  → ["OBV", "cmf_20", "vwap_ratio", ...]   # 38 признаков
-features_LKOH_v2.json  → ["high_252_ratio", "MACD_hist", ...]   # 31 признак
-features_YDEX_v2.json  → ["hist_vol_20", "donchian_pct", ...]   # 35 признаков
-```
-
-Инференс загружает `features_{ticker}_{version}.json` автоматически — изменений в коде не требуется.
-
-### Признаки (52 штуки)
-
-Все признаки нормализованы — не зависят от абсолютного уровня цены тикера.
-Это обеспечивает стационарность и корректное дообучение при росте или падении цены со временем.
-
-| Группа | Признак | Описание |
-|---|---|---|
-| Тренд | `SMA_20`, `SMA_50` | Скользящие средние |
-| Тренд | `ema12_ratio`, `ema26_ratio` | `close / EMA` — цена выше EMA > 1 (бычий), ниже < 1 |
-| Тренд | `ADX_14` | Сила тренда (0–100) |
-| Импульс | `RSI_14` | Осциллятор перекупленности/перепроданности |
-| Импульс | `MACD`, `MACD_signal`, `MACD_hist` | MACD-индикатор |
-| Импульс | `ROC_10` | Темп изменения цены за 10 свечей |
-| Импульс | `MFI_14` | Money Flow Index — RSI с учётом объёма [0–100] |
-| Импульс | `stoch_k`, `stoch_d` | Stochastic медленный %K/%D — позиция цены в диапазоне [0–100] |
-| Импульс | `CCI_14` | Commodity Channel Index — отклонение цены от статистической нормы |
-| Импульс | `aroon_up`, `aroon_down` | Сколько баров назад был max/min — сила и направление тренда |
-| Импульс (дельты) | `rsi_delta_4h` | RSI сейчас − RSI 4 бара назад — направление осциллятора |
-| Импульс (дельты) | `stoch_k_delta_4h` | Stochastic %K сейчас − 4 бара назад |
-| Импульс (дельты) | `macd_hist_delta_4h` | MACD histogram сейчас − 4 бара назад — усиление/ослабление |
-| Волатильность | `bb_pct_b` | Bollinger %B: позиция в полосах [0 = нижняя, 1 = верхняя] |
-| Волатильность | `atr_ratio` | `ATR_14 / close` — волатильность как % от цены |
-| Волатильность | `BB_width` | `(BB_upper − BB_lower) / BB_mid` — ширина полос |
-| Волатильность | `hist_vol_20` | Скользящее std доходностей за 20 баров — историческая волатильность |
-| Объём | `OBV` | On-Balance Volume |
-| Объём | `VOLUME_SMA_20` | Скользящее среднее объёма |
-| Объём | `volume_ratio` | `volume / VOLUME_SMA_20` — повышенный объём > 1 |
-| Объём | `cmf_20` | Chaikin Money Flow: покупательское давление по объёму за 20 баров |
-| Объём | `volume_change_1h`, `volume_change_4h` | Изменение объёма за 1/4 бара — предвестник ценового движения |
-| Производные | `close_sma20_ratio`, `close_sma50_ratio` | Цена относительно SMA |
-| Производные | `high_low_ratio` | `(high − low) / close` — диапазон бара |
-| Производные | `sma20_sma50_ratio` | > 1 = золотой крест (бычий), < 1 = мёртвый крест |
-| Производные | `vwap_ratio` | `close / VWAP` — цена относительно объёмно-взвешенной средней дня |
-| Экстремумы | `high_252_ratio` | `close / max(close, 252 бара)` — позиция у 52-недельного максимума |
-| Экстремумы | `low_252_ratio` | `close / min(close, 252 бара)` — позиция у 52-недельного минимума |
-| Donchian | `donchian_pct` | Позиция цены в 20-барном диапазоне: 1.0 = пробой вверх, 0.0 = вниз |
-| Donchian | `donchian_width` | Ширина Donchian канала / close — режим рынка (сжатие vs расширение) |
-| Роллинг | `return_mean_8h` | Среднее доходностей за 8 баров — краткосрочный тренд |
-| Роллинг | `return_std_8h` | Std доходностей за 8 баров — мини-волатильность |
-| Структура свечи | `body_ratio` | `(close − open) / (high − low)` — > 0 бычья, < 0 медвежья |
-| Структура свечи | `upper_shadow`, `lower_shadow` | Размер верхней/нижней тени — отверженные уровни |
-| Структура свечи | `gap` | `(open − prev_close) / prev_close` — гэп при открытии |
-| Лаговые доходности | `return_1h`, `return_4h`, `return_8h`, `return_24h` | `pct_change(N)` — прямой сигнал импульса; один из сильнейших предикторов |
-| Временные | `hour_sin`, `hour_cos` | Циклическое кодирование часа МСК (23:00 и 00:00 — соседние точки) |
-| Временные | `dayofweek_sin`, `dayofweek_cos` | Циклическое кодирование дня недели (0=Пн, 4=Пт) |
-
-### Ночное дообучение
-
-Каждую ночь в `RETRAIN_HOUR:RETRAIN_MINUTE` (по `RETRAIN_TIMEZONE`) бот автоматически:
-
-1. **Собирает новые свечи** — инкрементально, только с момента последней записи в БД
-2. **Переобучает per-ticker ансамбли** — на всех накопленных данных; Optuna HPO пропускается (используется кеш `best_params_*.json`)
-3. **Сбрасывает in-memory кеш** — следующий сигнал берётся из обновлённых весов
-4. **Отправляет уведомление в Telegram** — список обученных тикеров и ошибок
-
-### Визуализация обучения
-
-При запуске `python -m scripts.train_model` прогресс отображается в терминале:
-
-```
-════════════════════════════════════════════════════════
-  [1/3] SBER  (12450 строк)
-════════════════════════════════════════════════════════
-    LightGBM HPO      [████████████████████]  50/ 50 | best F1=0.4821
-    ExtraTrees HPO    [████████████████████]  30/ 30 | best F1=0.4612
-    SVC HPO           [████████████████████]  20/ 20 | best F1=0.4401
-  ▶ Отбор признаков (проход 1 из 2, порог ≥0.01)... ✓  38 из 52 признаков (−14)
-  ▶ CV оценка ансамбля... ✓  F1=0.4891
-  ▶ Финальное обучение ансамбля... ✓
-  Сохранено: ensemble_SBER_v2.pkl
-
-════════════════════════════════════════════════════════
-  ИТОГ: 3/3 тикеров обучено
-    ✓ SBER     → ensemble_SBER_v2.pkl
-    ✓ GAZP     → ensemble_GAZP_v2.pkl
-    ✓ LKOH     → ensemble_LKOH_v2.pkl
-════════════════════════════════════════════════════════
-```
-
-Чтобы увидеть таблицу важности признаков после каждого тикера — установить `ML_PRINT_FEATURE_IMPORTANCE=true` в `.env`.
-
-Гиперпараметры кешируются в `ml/weights/best_params_{model}_{ticker}_{version}.json`.
-При повторном запуске без `--force-tune` HPO пропускается — используется кеш.
-
----
-
-## Торговля
-
-### Авто-режим
-
-Scheduler запускается как фоновый asyncio-task вместе с ботом.
-Каждые `TRADING_INTERVAL_SECONDS` выполняется один тик:
-
-1. Проверяются открытые позиции — срабатывание **стоп-лосс** или **тейк-профит**
-   — в экс-дивидендный день SL-порог автоматически снижается на размер дивиденда,
-   чтобы предсказуемый гэп не вызвал ложное срабатывание
-2. Получаются ML-сигналы для всех тикеров
-3. **SELL-сигнал** — позиция закрывается только если чистый P&L > 0 после комиссий и НДФЛ
-   _(SL/TP исполняются всегда — это управление риском)_
-4. **BUY-сигнал** — позиция открывается при `confidence ≥ TRADING_CONFIDENCE_THRESHOLD`,
-   наличии свободных слотов и достаточном балансе; если средств не хватает —
-   ордер не выставляется, в Telegram отправляется уведомление
-
-### Ручной режим
-
-Переключение прямо из бота кнопкой «Переключить на ручной».
-Доступны кнопки **Купить** и **Продать**:
-- **Покупка**: проверяет баланс, размер лота и лимит позиций; показывает прогноз P&L при TP/SL
-- **Продажа**: показывает расчёт чистого P&L → требует подтверждения
-
-### Расчёт P&L
-
-```
-entry_total  = цена_входа  × лоты × размер_лота
-exit_total   = цена_выхода × лоты × размер_лота
-gross_pnl    = exit_total - entry_total
-комиссии     = entry_total × commission_pct + exit_total × commission_pct
-НДФЛ         = max(0, (gross_pnl - комиссии) × tax_pct)
-net_pnl      = gross_pnl - комиссии - НДФЛ
-```
-
-`TRADING_STOP_LOSS_PCT` и `TRADING_TAKE_PROFIT_PCT` задаются как **целевой чистый** результат.
-Бот сам пересчитывает нужный gross-уровень цены. Пример при комиссии 0.3% и НДФЛ 13%:
-
-```
-TP = 1% чистых → цена должна вырасти на +1.75% (gross)
-SL = 10% чистых → цена должна упасть на −9.42% (gross)
-```
-
-### FIFO
-
-При наличии нескольких открытых позиций по одному активу всегда продаётся
-самая ранняя (по дате открытия).
-
-### Фильтр подтверждения объёмом
-
-BUY-сигнал открывает позицию только если объём последнего бара превышает SMA_20(объём) на заданный коэффициент:
-
-```
-volume_ratio = volume_last_bar / SMA_20(volume)
-
-BUY + confidence >= threshold + volume_ratio >= TRADING_VOLUME_MIN_RATIO → открыть позицию
-BUY + volume_ratio < TRADING_VOLUME_MIN_RATIO → пропустить (лог: "объём ниже порога")
-```
-
-Повышенный объём подтверждает что за движением стоят крупные участники, а не случайное колебание.
-Рекомендуемые значения: `1.0` (отключён) → `1.1` (мягкий) → `1.3` (умеренный) → `1.5` (строгий).
-
-### Дивидендная защита стоп-лосса
-
-Когда компания выплачивает дивиденды, акция предсказуемо падает примерно на
-сумму дивиденда в экс-дивидендный день. Чтобы это не вызвало ложное срабатывание
-стоп-лосса, бот применяет защитный сдвиг:
-
-```
-effective_sl = stop_loss_price - dividend_per_share
-```
-
-Для каждой акции автоматически вычисляется среднее количество дней, за которые
-дивидендный гэп исторически закрывался (данные за 5 лет, дневные свечи):
-
-1. Получить все дивидентные события из Tinkoff API
-2. Для каждого — найти первый день, когда цена вернулась к 98 % от уровня до гэпа
-3. Среднее (ceiling) сохраняется в PostgreSQL (`assets.dividend_gap_days`)
-4. Пересчёт — раз в 30 дней или при первом добавлении актива
-
-| Приоритет | Источник | Как задать |
-|---|---|---|
-| 1 (высший) | Ручное переопределение | `TRADING_DIVIDEND_OVERRIDE=SBER:45,GAZP:90` |
-| 2 | PostgreSQL (`assets.dividend_gap_days`) | Авто или `UPDATE assets SET ...` |
-| 3 | Глобальный фоллбэк | `TRADING_DIVIDEND_PROTECTION_DAYS=1` |
-
----
-
-## Портфель
-
-При открытии раздела «Портфель» отображается:
-- Общая стоимость счёта (активы + свободный остаток)
-- Свободный рублёвый баланс
-- Итоговая стоимость по каждой категории
-
-Четыре кнопки для перехода в список активов:
-
-| Кнопка | Тип инструмента | Показывает |
-|---|---|---|
-| 📈 Акции | `share` | Тикер, кол-во шт., ср. цена покупки, текущая цена, P&L |
-| 📄 Облигации | `bond` | Тикер, кол-во шт., ср. цена покупки, текущая цена, P&L |
-| 🏦 ETF | `etf` | Тикер, кол-во шт., ср. цена покупки, текущая цена, P&L |
-| 💱 Валюта | `currency` | Валюта, объём, ср. цена покупки, текущая цена, P&L |
-
-Тикер определяется по FIGI из таблицы `assets` в БД.
-Для активов вне отслеживаемого списка отображается FIGI[:10].
-
----
-
-## Redis-кеш
-
-Кеш включён для дорогостоящих сетевых операций. При недоступности Redis
-всё работает без кеша (graceful degradation).
-
-| Что кешируется | Ключ | TTL |
-|---|---|---|
-| ML-сигнал | `signal:{ticker}:{version}` | `REDIS_SIGNAL_TTL` |
-| Свечи из БД | `candles:{ticker}:{interval}` | `REDIS_CANDLES_TTL` |
-| Портфель | `portfolio:{account_id}` | `REDIS_PORTFOLIO_TTL` |
-| Последние цены | `last_price:{instrument_id}` | `REDIS_PRICE_TTL` |
-| Дивидендные выплаты | `dividend_drop:{figi}:{date}:{days}` | `REDIS_DIVIDEND_TTL` |
-
----
-
-## Настройки `.env`
-
-Все параметры настраиваются через `.env` (скопировать из `.env.example`).
-
-### Tinkoff API
-
-| Переменная | Описание | По умолчанию |
-|---|---|---|
-| `TINKOFF_TOKEN` | API-токен Tinkoff Invest | — |
-| `TINKOFF_ACCOUNT_ID` | ID счёта | — |
-| `TINKOFF_SANDBOX` | Режим песочницы | `false` |
-| `TINKOFF_POST_ORDER_RATE` | Лимит PostOrder (заявок/сек) | `15` |
-
-### Сбор данных
-
-| Переменная | Описание | По умолчанию |
-|---|---|---|
-| `DATA_TICKERS` | Тикеры через запятую | `SBER,GAZP,...` |
-| `DATA_CANDLE_INTERVAL` | Интервал свечей (`1h`, `1d`, `15min`) | `1h` |
-| `DATA_HISTORY_DAYS` | Глубина истории при первом запуске | `365` |
-
-### ML
-
-| Переменная | Описание | По умолчанию |
-|---|---|---|
-| `ML_MODEL_VERSION` | Суффикс файлов весов | `v2` |
-| `ML_LOOKAHEAD` | Свечей вперёд для генерации меток | `8` |
-| `ML_THRESHOLD` | Порог доходности ±% для BUY/SELL | `0.007` |
-| `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `50` |
-| `ML_OPTUNA_TRIALS_ET` | Итераций Optuna для ExtraTreesClassifier | `30` |
-| `ML_OPTUNA_TRIALS_SVC` | Итераций Optuna для SVC (Platt scaling — держать ≤ 20) | `20` |
-| `ML_FEATURE_IMPORTANCE_THRESHOLD` | Порог importance для отбора признаков per-ticker (`0.0` = отключить) | `0.01` |
-| `ML_PRINT_FEATURE_IMPORTANCE` | Выводить таблицу важности признаков после обучения | `false` |
-| `ML_FORCE_TUNE` | Принудительный перезапуск Optuna | `false` |
-
-### Ночное дообучение
-
-| Переменная | Описание | По умолчанию |
-|---|---|---|
-| `RETRAIN_ENABLED` | Включить ночное дообучение | `true` |
-| `RETRAIN_HOUR` | Час запуска (0–23) | `2` |
-| `RETRAIN_MINUTE` | Минута запуска (0–59) | `0` |
-| `RETRAIN_TIMEZONE` | Часовой пояс (IANA) | `Europe/Moscow` |
-| `RETRAIN_FORCE_TUNE` | Перезапустить Optuna HPO (занимает часы) | `false` |
-
-### Redis
-
-| Переменная | Описание | По умолчанию |
-|---|---|---|
-| `REDIS_HOST` | Хост Redis | `localhost` |
-| `REDIS_PORT` | Порт Redis | `6379` |
-| `REDIS_SIGNAL_TTL` | TTL кеша сигналов (сек) | `60` |
-| `REDIS_CANDLES_TTL` | TTL кеша свечей (сек) | `300` |
-| `REDIS_PORTFOLIO_TTL` | TTL кеша портфеля (сек) | `60` |
-| `REDIS_PRICE_TTL` | TTL кеша цен (сек) | `30` |
-| `REDIS_DIVIDEND_TTL` | TTL кеша дивидендных выплат (сек) | `86400` |
-
-### Автоторговля
-
-| Переменная | Описание | По умолчанию |
-|---|---|---|
-| `TRADING_ENABLED` | Включить автоторговлю | `false` |
-| `TRADING_CONFIDENCE_THRESHOLD` | Мин. уверенность модели для BUY | `0.65` |
-| `TRADING_LOTS_PER_TICKER` | Лотов на каждую сделку | `1` |
-| `TRADING_STOP_LOSS_PCT` | Целевой чистый убыток для стоп-лосса (после комиссий) | `0.03` |
-| `TRADING_TAKE_PROFIT_PCT` | Целевая чистая прибыль для тейк-профита (после комиссий и НДФЛ) | `0.05` |
-| `TRADING_MAX_POSITIONS` | Макс. одновременных позиций | `5` |
-| `TRADING_INTERVAL_SECONDS` | Интервал проверки сигналов (сек) | `3600` |
-| `TRADING_CHAT_ID` | Telegram chat_id для уведомлений | — |
-| `TRADING_BROKER_COMMISSION_PCT` | Комиссия брокера за сделку | `0.003` |
-| `TRADING_TAX_PCT` | НДФЛ на прибыль от продажи | `0.13` |
-| `TRADING_DIVIDEND_PROTECTION_DAYS` | Дней защиты SL после экс-даты (глобальный фоллбэк) | `1` |
-| `TRADING_DIVIDEND_OVERRIDE` | Ручные окна защиты по тикерам (`SBER:45,GAZP:90`) | — |
-| `TRADING_VOLUME_MIN_RATIO` | Мин. `volume_ratio` для подтверждения BUY (`1.0` = отключён) | `1.0` |
-
----
-
-## Docker
-
-| Сервис | Образ | Роль |
-|---|---|---|
-| `postgres` | `postgres:15-alpine` | PostgreSQL (данные в named volume `postgres_data`) |
-| `redis` | `redis:7-alpine` | Redis-кеш (данные в named volume `redis_data`) |
-| `bot` | сборка из `Dockerfile` | Telegram-бот + автоторговля |
-
-Сервисы `postgres` и `redis` имеют healthcheck; бот стартует только после их готовности.
-Директория `ml/weights/` смонтирована как bind-mount — веса не теряются при пересборке образа.
-
-Все переменные берутся из `.env` через `env_file`. Два параметра переопределяются автоматически:
-
-```yaml
-POSTGRES_HOST: postgres   # внутри Docker — имя сервиса, не localhost
-REDIS_HOST: redis
-```
-
----
+При первом запуске автоматически применяются миграции Alembic.
+Подробнее о Docker: [docs/docker.md](docs/docker.md).
+
+## Документация
+
+| Раздел | Описание |
+|---|---|
+| [docs/ml.md](docs/ml.md) | ML-ансамбль, признаки, per-ticker отбор, ночное дообучение |
+| [docs/trading.md](docs/trading.md) | Авто/ручная торговля, P&L, FIFO, дивидендная защита |
+| [docs/settings.md](docs/settings.md) | Все переменные `.env` с описанием и дефолтами |
+| [docs/docker.md](docs/docker.md) | Docker Compose: сервисы, команды, переменные окружения |
 
 ## Структура проекта
 
 ```
 we_trust_in_people/
-├── config/
-│   └── settings.py          # Pydantic Settings: все параметры из .env
-├── db/
-│   ├── models.py            # ORM-модели: Asset, Candle, Signal, Trade
-│   ├── database.py          # Async engine, get_session()
-│   ├── candle_repo.py       # CRUD для активов и свечей
-│   └── trade_repo.py        # CRUD для сделок (FIFO-порядок)
-├── tinkoff/
-│   ├── client.py            # Async gRPC клиент (t-tech-investments)
-│   ├── market_data.py       # Свечи, последние цены (кеш Redis)
-│   ├── instruments.py       # Поиск инструмента по тикеру, lot_size
-│   ├── rate_limiter.py      # Rate limiter (TINKOFF_POST_ORDER_RATE)
-│   ├── portfolio.py         # Портфель, баланс, рыночные ордера
-│   ├── dividends.py         # Размер дивиденда в окне защиты (кеш Redis 24 ч)
-│   └── dividend_gap_stats.py # Статистика закрытия дивидендного гэпа (PostgreSQL)
-├── ml/
-│   ├── features.py          # Feature engineering (52 признака, TA-Lib)
-│   ├── dataset.py           # Загрузка данных из БД (кеш Redis)
-│   ├── train.py             # Обучение per-ticker ансамблей + Optuna HPO + прогресс
-│   ├── tune.py              # Optuna HPO для LightGBM / ExtraTrees / SVC
-│   ├── predict.py           # Инференс, predict_all() (кеш Redis)
-│   └── weights/             # Веса моделей (не в репозитории): ensemble_{ticker}_{version}.pkl
-├── trading/
-│   ├── __init__.py
-│   ├── state.py             # Runtime-флаг авто/ручной режим
-│   ├── profitability.py     # Расчёт P&L: комиссии + НДФЛ + безубыток
-│   ├── executor.py          # Открытие/закрытие позиций через Tinkoff API
-│   ├── scheduler.py         # Главный цикл автоторговли (asyncio task)
-│   ├── retrain_scheduler.py # Ночное дообучение ML-моделей (asyncio task)
-│   └── notifier.py          # Telegram-уведомления о сделках и дообучении
-├── bot/
-│   ├── main.py              # Точка входа бота, запуск scheduler
-│   ├── keyboards.py         # Все inline-клавиатуры
-│   └── handlers/
-│       ├── main.py          # Главное меню
-│       ├── signals.py       # ML-сигналы по тикерам
-│       ├── portfolio.py     # Портфель: сводка + акции/облигации/ETF/валюта
-│       └── trading.py       # Торговля: авто/ручной, позиции, история
-├── agents/
-│   ├── coder.py             # Agent 1: пишет код
-│   ├── reviewer.py          # Agent 2: ревьюит код
-│   └── architect.py         # Agent 3: валидирует по спецификации
-├── scripts/
-│   ├── collect_candles.py   # Сбор исторических свечей
-│   ├── train_model.py       # Обучение ML-модели
-│   └── run_bot.py           # Запуск Telegram-бота
-├── utils/
-│   ├── logger.py            # Structured logging (structlog)
-│   └── redis_cache.py       # Redis синглтон: init/get/close
+├── config/settings.py       # Pydantic Settings: все параметры из .env
+├── db/                      # ORM-модели, async engine, CRUD (candles, trades)
+├── tinkoff/                 # Async gRPC клиент, рыночные данные, портфель, дивиденды
+├── ml/                      # Feature engineering, обучение, инференс, веса
+├── trading/                 # Исполнение ордеров, scheduler, P&L, уведомления
+├── bot/                     # Telegram-бот: handlers, keyboards
+├── scripts/                 # Точки входа: collect_candles, train_model, run_bot
+├── utils/                   # logger, redis_cache
+├── docs/                    # Подробная документация
 ├── alembic/                 # Миграции БД
 ├── Dockerfile
 ├── docker-compose.yml
-├── .env.example             # Пример конфигурации
-└── CLAUDE.md                # Правила проекта для AI-ассистента
+└── .env.example
 ```
-
----
-
-## 3-агентная система
-
-Экспериментальный модуль для ассистирования в разработке:
-
-- **Coder** (`agents/coder.py`) — реализует задачи по спецификации
-- **Reviewer** (`agents/reviewer.py`) — проверяет баги, стиль, async-корректность
-- **Architect** (`agents/architect.py`) — валидирует соответствие спецификации проекта
-
-Требует `ANTHROPIC_API_KEY` в `.env`.
-
----
 
 ## Важные ограничения
 
-- Бинарные веса ML-моделей (`*.pkl`) **не включены** в репозиторий (>100 МБ)
+- Веса ML-моделей (`*.pkl`) **не включены** в репозиторий
 - Файл `.env` с реальными ключами **никогда не коммитится**
 - Перед включением `TRADING_ENABLED=true` убедитесь в корректности всех параметров
 - `TINKOFF_SANDBOX=false` — торгуете реальными деньгами
