@@ -7,7 +7,7 @@
 
 - **Tinkoff Invest API** — асинхронная интеграция, боевой режим, rate limiter
 - **Сбор рыночных данных** — исторические свечи по списку тикеров, инкрементальное обновление
-- **ML-ансамбль** — отдельный `VotingClassifier(soft)` LightGBM + RandomForest для каждого тикера, Optuna HPO, сигналы BUY / SELL / HOLD; 2-проходное обучение с per-ticker отбором признаков по нормализованной importance
+- **ML-ансамбль** — отдельный `VotingClassifier(soft)` LightGBM + ExtraTreesClassifier для каждого тикера, Optuna HPO, сигналы BUY / SELL / HOLD; 2-проходное обучение с per-ticker отбором признаков по нормализованной importance
 - **Ночное дообучение** — каждую ночь инкрементально собирает новые свечи и переобучает модели на свежих данных
 - **Redis-кеш** — свечи, цены, портфель, сигналы; graceful degradation при недоступности Redis
 - **Telegram-бот** — полностью inline-интерфейс (без ReplyKeyboard)
@@ -158,7 +158,7 @@ we_trust_in_people/
 | `ML_LOOKAHEAD` | Свечей вперёд для генерации меток | `8` |
 | `ML_THRESHOLD` | Порог доходности ±% для BUY/SELL | `0.007` |
 | `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `50` |
-| `ML_OPTUNA_TRIALS_RF` | Итераций Optuna для RandomForest | `30` |
+| `ML_OPTUNA_TRIALS_ET` | Итераций Optuna для ExtraTreesClassifier | `30` |
 | `ML_FEATURE_IMPORTANCE_THRESHOLD` | Порог importance для отбора признаков per-ticker (`0.0` = отключить) | `0.01` |
 | `ML_PRINT_FEATURE_IMPORTANCE` | Выводить таблицу важности признаков после обучения | `false` |
 | `ML_FORCE_TUNE` | Принудительный перезапуск Optuna | `false` |
@@ -283,11 +283,15 @@ features_YDEX_v2.json  → ["hist_vol_20", "donchian_pct", ...]   # 35 приз�
 VotingClassifier(
     estimators=[
         Pipeline([("scaler", StandardScaler()), ("model", LGBMClassifier(...))]),
-        Pipeline([("scaler", StandardScaler()), ("model", RandomForestClassifier(...))]),
+        Pipeline([("scaler", StandardScaler()), ("model", ExtraTreesClassifier(...))]),
     ],
     voting="soft",  # усреднение вероятностей, а не голосование классами
 )
 ```
+
+**Почему ExtraTrees, а не RandomForest:** ET использует случайные пороги разбиений вместо
+поиска лучшего — корреляция с LightGBM значительно ниже, ансамбль получает реальное разнообразие.
+RandomForest давал эффект хуже каждой модели по отдельности из-за высокой корреляции с LightGBM.
 
 `StackingClassifier` не подходит для временных рядов: его внутренний `cv=StratifiedKFold`
 перемешивает данные → утечка будущего в OOF → мета-модель деградирует на честном `TimeSeriesSplit`.

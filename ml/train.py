@@ -6,7 +6,7 @@
     2. Вычисление признаков (TA-Lib индикаторы)
     3. Генерация меток по будущей доходности
     4. Подбор гиперпараметров через Optuna (с кешем best_params_*_{ticker}_{version}.json)
-    5. Обучение ансамбля VotingClassifier(soft) — LightGBM + RandomForest
+    5. Обучение ансамбля VotingClassifier(soft) — LightGBM + ExtraTrees
     6. Сохранение весов в ml/weights/ensemble_{ticker}_{version}.pkl
 
 Запуск:
@@ -22,7 +22,7 @@ from pathlib import Path
 import lightgbm as lgb
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier, VotingClassifier
+from sklearn.ensemble import ExtraTreesClassifier, VotingClassifier
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -31,7 +31,7 @@ from config.settings import data_settings, ml_settings
 from ml.dataset import load_all_tickers_dataset
 from ml.features import FEATURE_COLUMNS, compute_features
 from ml.labels import LABEL_NAMES, create_labels
-from ml.tune import tune_lgbm, tune_random_forest
+from ml.tune import tune_extra_trees, tune_lgbm
 from utils.logger import logger
 
 WEIGHTS_DIR = Path(__file__).parent / "weights"
@@ -298,15 +298,17 @@ def _train_single_ticker(
         return _get_params(model_name, ticker_version, tune_fn, X, y, force_tune)
 
     lgbm_params = _get_with_display("lgbm", tune_lgbm)
-    rf_params   = _get_with_display("rf", tune_random_forest)
+    et_params   = _get_with_display("et", tune_extra_trees)
 
     # Балансировка классов — фиксированный параметр, не из HPO-кеша.
     # Без него модели выучивают "всегда HOLD" → F1_macro ≈ 0.33 (случайный уровень).
     lgbm_params["class_weight"] = "balanced"
-    rf_params["class_weight"] = "balanced"
+    et_params["class_weight"] = "balanced"
 
     # Каждая базовая модель обёрнута в Pipeline со StandardScaler.
     # VotingClassifier(voting='soft') усредняет предсказанные вероятности базовых моделей.
+    # ExtraTrees использует случайные пороги разбиений — низкая корреляция с LightGBM,
+    # что даёт реальное разнообразие ансамблю в отличие от RandomForest.
     # StackingClassifier не подходит для временных рядов: его внутренний cv=StratifiedKFold
     # перемешивает данные → утечка будущего в OOF → мета-модель деградирует на TimeSeriesSplit.
     def _make_ensemble() -> VotingClassifier:
@@ -316,7 +318,7 @@ def _train_single_ticker(
         return VotingClassifier(
             estimators=[
                 _scaled("lgbm", lgb.LGBMClassifier(**lgbm_params)),
-                _scaled("rf", RandomForestClassifier(**rf_params)),
+                _scaled("et", ExtraTreesClassifier(**et_params)),
             ],
             voting="soft",
         )

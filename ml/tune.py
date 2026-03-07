@@ -16,7 +16,7 @@ import numpy as np
 import optuna
 import pandas as pd
 import xgboost as xgb
-from sklearn.ensemble import RandomForestClassifier
+from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.metrics import f1_score
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
@@ -230,14 +230,17 @@ def tune_xgboost(
 
 # ── Random Forest ─────────────────────────────────────────────────────────────
 
-def tune_random_forest(
+def tune_extra_trees(
     X: pd.DataFrame,
     y: pd.Series,
     n_trials: int | None = None,
     version: str | None = None,
 ) -> dict:
     """
-    Подобрать гиперпараметры RandomForest через Optuna.
+    Подобрать гиперпараметры ExtraTreesClassifier через Optuna.
+
+    ExtraTrees использует случайные пороги разбиений (вместо лучших как в RF),
+    что даёт низкую корреляцию с LightGBM и реальное разнообразие ансамблю.
 
     Аргументы:
         X:        DataFrame признаков.
@@ -248,7 +251,7 @@ def tune_random_forest(
     Возвращает:
         Словарь лучших гиперпараметров.
     """
-    n_trials = n_trials or ml_settings.optuna_trials_rf
+    n_trials = n_trials or ml_settings.optuna_trials_et
     version = version or ml_settings.model_version
     cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
 
@@ -258,12 +261,13 @@ def tune_random_forest(
             "max_depth": trial.suggest_int("max_depth", 5, 30),
             "min_samples_split": trial.suggest_int("min_samples_split", 2, 20),
             "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 10),
+            # max_features: ET особенно чувствителен к этому параметру
+            "max_features": trial.suggest_float("max_features", 0.3, 1.0),
             "random_state": ml_settings.random_state,
             "n_jobs": -1,
-            # Балансировка классов: аналогично LightGBM
             "class_weight": "balanced",
         }
-        model = Pipeline([("scaler", StandardScaler()), ("model", RandomForestClassifier(**params))])
+        model = Pipeline([("scaler", StandardScaler()), ("model", ExtraTreesClassifier(**params))])
         return _cv_f1_score(model, X, y, cv)
 
     study = optuna.create_study(direction="maximize")
@@ -271,19 +275,19 @@ def tune_random_forest(
         objective,
         n_trials=n_trials,
         show_progress_bar=False,
-        callbacks=[_make_progress_callback(n_trials, "RandomForest HPO")],
+        callbacks=[_make_progress_callback(n_trials, "ExtraTrees HPO")],
     )
 
     best_params = study.best_params
     best_params.update({"random_state": ml_settings.random_state, "n_jobs": -1, "class_weight": "balanced"})
 
     logger.info(
-        "RandomForest tuning complete",
+        "ExtraTrees tuning complete",
         best_f1=round(study.best_value, 4),
         best_params=best_params,
     )
 
-    _save_params(best_params, f"best_params_rf_{version}.json")
+    _save_params(best_params, f"best_params_et_{version}.json")
     return best_params
 
 
