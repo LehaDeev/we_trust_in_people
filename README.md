@@ -6,7 +6,7 @@
 ## Возможности
 
 - **Tinkoff Invest API** — асинхронная интеграция, боевой режим, rate limiter
-- **ML-ансамбль** — `VotingClassifier(soft)`: LightGBM + ExtraTrees + SVC, Optuna HPO, per-ticker отбор признаков → [подробнее](docs/ml.md)
+- **ML-ансамбль** — `VotingClassifier(soft)`: LightGBM + ExtraTrees, Optuna HPO, per-ticker отбор признаков → [подробнее](docs/ml.md)
 - **Ночное дообучение** — инкрементальный сбор свечей и переобучение моделей каждую ночь
 - **Автоторговля** — рыночные ордера по ML-сигналам, SL/TP, дивидендная защита → [подробнее](docs/trading.md)
 - **Ручная торговля** — покупка/продажа через Telegram с расчётом P&L и подтверждением

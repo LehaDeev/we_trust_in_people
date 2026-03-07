@@ -10,7 +10,6 @@ VotingClassifier(
     estimators=[
         Pipeline([("scaler", StandardScaler()), ("model", LGBMClassifier(...))]),
         Pipeline([("scaler", StandardScaler()), ("model", ExtraTreesClassifier(...))]),
-        Pipeline([("scaler", StandardScaler()), ("model", SVC(kernel="rbf", probability=True, ...))]),
     ],
     voting="soft",  # усреднение вероятностей, а не голосование классами
 )
@@ -20,10 +19,9 @@ VotingClassifier(
 поиска лучшего — корреляция с LightGBM значительно ниже, ансамбль получает реальное разнообразие.
 RandomForest давал эффект хуже каждой модели по отдельности из-за высокой корреляции с LightGBM.
 
-**Почему SVC (RBF):** принципиально иной алгоритм — максимальный зазор в признаковом пространстве.
-Хорошо работает там, где деревья дают нечёткую границу. `probability=True` включает Platt scaling
-для получения вероятностей (нужно для soft voting), из-за чего HPO медленнее — рекомендуется
-`ML_OPTUNA_TRIALS_SVC ≤ 20`.
+**Почему не SVC:** SVC (RBF) был протестирован, но дал F1=0.3831 — ниже обоих деревьев (~0.405).
+В soft voting его плохо калиброванные вероятности (Platt scaling) тянули ансамбль вниз:
+итоговый F1 ансамбля 0.3913 оказался хуже каждой модели по отдельности. SVC исключён.
 
 `StackingClassifier` не подходит для временных рядов: его внутренний `cv=StratifiedKFold`
 перемешивает данные → утечка будущего в OOF → мета-модель деградирует на честном `TimeSeriesSplit`.
