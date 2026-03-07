@@ -7,13 +7,13 @@
 
 - **Tinkoff Invest API** — асинхронная интеграция, боевой режим, rate limiter
 - **Сбор рыночных данных** — исторические свечи по списку тикеров, инкрементальное обновление
-- **ML-ансамбль** — отдельный `VotingClassifier(soft)` LightGBM + ExtraTreesClassifier для каждого тикера, Optuna HPO, сигналы BUY / SELL / HOLD; 2-проходное обучение с per-ticker отбором признаков по нормализованной importance
-- **Ночное дообучение** — каждую ночь инкрементально собирает новые свечи и переобучает модели на свежих данных
+- **ML-ансамбль** — отдельный `VotingClassifier(soft)` LightGBM + ExtraTrees + SVC для каждого тикера, Optuna HPO, сигналы BUY / SELL / HOLD; 2-проходное обучение с per-ticker отбором признаков
+- **Ночное дообучение** — каждую ночь инкрементально собирает новые свечи и переобучает модели
 - **Redis-кеш** — свечи, цены, портфель, сигналы; graceful degradation при недоступности Redis
 - **Telegram-бот** — полностью inline-интерфейс (без ReplyKeyboard)
-- **Портфель** — сводка по счёту + детализация по категориям (акции / облигации / ETF / валюта) с количеством и средней ценой покупки
-- **Автоторговля** — рыночные ордера по ML-сигналам, стоп-лосс, тейк-профит, проверка баланса перед покупкой
-- **Дивидендная защита SL** — автоматический сдвиг стоп-лосса в экс-дивидендный день; окно защиты рассчитывается индивидуально для каждой акции на основе исторических гэпов (хранится в PostgreSQL)
+- **Портфель** — сводка по счёту + детализация по категориям (акции / облигации / ETF / валюта)
+- **Автоторговля** — рыночные ордера по ML-сигналам, стоп-лосс, тейк-профит
+- **Дивидендная защита SL** — автоматический сдвиг стоп-лосса в экс-дивидендный день
 - **Ручная торговля** — покупка/продажа через Telegram с проверкой баланса
 - **FIFO при продаже** — закрывается самая ранняя позиция по каждому активу
 - **Расчёт рентабельности** — чистый P&L с учётом комиссий брокера и НДФЛ
@@ -92,150 +92,68 @@ PostgreSQL и Redis поднимаются вместе; бот ждёт их he
 docker compose up -d --build
 ```
 
-## Структура проекта
+---
 
-```
-we_trust_in_people/
-├── config/
-│   └── settings.py          # Pydantic Settings: все параметры из .env
-├── db/
-│   ├── models.py            # ORM-модели: Asset, Candle, Signal, Trade
-│   ├── database.py          # Async engine, get_session()
-│   ├── candle_repo.py       # CRUD для активов и свечей
-│   └── trade_repo.py        # CRUD для сделок (FIFO-порядок)
-├── tinkoff/
-│   ├── client.py            # Async gRPC клиент (t-tech-investments)
-│   ├── market_data.py       # Свечи, последние цены (кеш Redis)
-│   ├── instruments.py       # Поиск инструмента по тикеру, lot_size
-│   ├── rate_limiter.py      # Rate limiter (TINKOFF_POST_ORDER_RATE)
-│   ├── portfolio.py         # Портфель, баланс, рыночные ордера
-│   ├── dividends.py         # Размер дивиденда в окне защиты (кеш Redis 24 ч)
-│   └── dividend_gap_stats.py # Статистика закрытия дивидендного гэпа (PostgreSQL)
-├── ml/
-│   ├── features.py          # Feature engineering (TA-Lib индикаторы)
-│   ├── dataset.py           # Загрузка данных из БД (кеш Redis)
-│   ├── train.py             # Обучение per-ticker ансамблей + Optuna HPO + прогресс в терминале
-│   ├── tune.py              # Optuna HPO для LightGBM / CatBoost / RandomForest (с progress bar)
-│   ├── predict.py           # Инференс, predict_all() (кеш Redis)
-│   └── weights/             # Веса моделей (не в репозитории): ensemble_{ticker}_{version}.pkl
-├── trading/
-│   ├── __init__.py
-│   ├── state.py             # Runtime-флаг авто/ручной режим
-│   ├── profitability.py     # Расчёт P&L: комиссии + НДФЛ + безубыток
-│   ├── executor.py          # Открытие/закрытие позиций через Tinkoff API
-│   ├── scheduler.py         # Главный цикл автоторговли (asyncio task)
-│   ├── retrain_scheduler.py # Ночное дообучение ML-моделей (asyncio task)
-│   └── notifier.py          # Telegram-уведомления о сделках и дообучении
-├── bot/
-│   ├── main.py              # Точка входа бота, запуск scheduler
-│   ├── keyboards.py         # Все inline-клавиатуры
-│   └── handlers/
-│       ├── main.py          # Главное меню
-│       ├── signals.py       # ML-сигналы по тикерам
-│       ├── portfolio.py     # Портфель: сводка + акции/облигации/ETF/валюта
-│       └── trading.py       # Торговля: авто/ручной, позиции, история
-├── agents/
-│   ├── coder.py             # Agent 1: пишет код
-│   ├── reviewer.py          # Agent 2: ревьюит код
-│   └── architect.py         # Agent 3: валидирует по спецификации
-├── scripts/
-│   ├── collect_candles.py   # Сбор исторических свечей
-│   ├── train_model.py       # Обучение ML-модели
-│   └── run_bot.py           # Запуск Telegram-бота
-├── utils/
-│   ├── logger.py            # Structured logging (structlog)
-│   └── redis_cache.py       # Redis синглтон: init/get/close
-├── alembic/                 # Миграции БД
-├── .env.example             # Пример конфигурации
-└── CLAUDE.md                # Правила проекта для AI-ассистента
+## ML-система
+
+### Архитектура ансамбля
+
+Для каждого тикера обучается отдельный `VotingClassifier(voting='soft')` — усреднение вероятностей.
+Каждая базовая модель обёрнута в `Pipeline(StandardScaler)`:
+
+```python
+VotingClassifier(
+    estimators=[
+        Pipeline([("scaler", StandardScaler()), ("model", LGBMClassifier(...))]),
+        Pipeline([("scaler", StandardScaler()), ("model", ExtraTreesClassifier(...))]),
+        Pipeline([("scaler", StandardScaler()), ("model", SVC(kernel="rbf", probability=True, ...))]),
+    ],
+    voting="soft",  # усреднение вероятностей, а не голосование классами
+)
 ```
 
-## Настройки `.env`
+**Почему ExtraTrees, а не RandomForest:** ET использует случайные пороги разбиений вместо
+поиска лучшего — корреляция с LightGBM значительно ниже, ансамбль получает реальное разнообразие.
+RandomForest давал эффект хуже каждой модели по отдельности из-за высокой корреляции с LightGBM.
 
-Все параметры настраиваются через `.env` (скопировать из `.env.example`).
+**Почему SVC (RBF):** принципиально иной алгоритм — максимальный зазор в признаковом пространстве.
+Хорошо работает там, где деревья дают нечёткую границу. `probability=True` включает Platt scaling
+для получения вероятностей (нужно для soft voting), из-за чего HPO медленнее — рекомендуется
+`ML_OPTUNA_TRIALS_SVC ≤ 20`.
 
-### Tinkoff API
+`StackingClassifier` не подходит для временных рядов: его внутренний `cv=StratifiedKFold`
+перемешивает данные → утечка будущего в OOF → мета-модель деградирует на честном `TimeSeriesSplit`.
+Весь ансамбль сохраняется в одном `.pkl` файле.
 
-| Переменная | Описание | По умолчанию |
-|---|---|---|
-| `TINKOFF_TOKEN` | API-токен Tinkoff Invest | — |
-| `TINKOFF_ACCOUNT_ID` | ID счёта | — |
-| `TINKOFF_SANDBOX` | Режим песочницы | `false` |
-| `TINKOFF_POST_ORDER_RATE` | Лимит PostOrder (заявок/сек) | `15` |
+> **Важно:** после изменения набора признаков (`features.py`) или структуры ансамбля
+> необходимо запустить `python -m scripts.train_model --force-tune` —
+> Optuna подберёт гиперпараметры под новый набор признаков.
 
-### Сбор данных
+### Per-ticker отбор признаков
 
-| Переменная | Описание | По умолчанию |
-|---|---|---|
-| `DATA_TICKERS` | Тикеры через запятую | `SBER,GAZP,...` |
-| `DATA_CANDLE_INTERVAL` | Интервал свечей (`1h`, `1d`, `15min`) | `1h` |
-| `DATA_HISTORY_DAYS` | Глубина истории при первом запуске | `365` |
+Обучение проходит в **два прохода**:
 
-### ML
+1. **Проход 1** — быстрый `fit` ансамбля на всех 52 признаках. Вычисляется нормализованная
+   importance для каждой модели (LightGBM и ExtraTrees независимо нормализуются к сумме = 1,
+   затем усредняются; SVC не имеет `feature_importances_` и пропускается). Признаки с
+   `avg_importance < ML_FEATURE_IMPORTANCE_THRESHOLD` отбрасываются.
 
-| Переменная | Описание | По умолчанию |
-|---|---|---|
-| `ML_MODEL_VERSION` | Суффикс файлов весов | `v2` |
-| `ML_LOOKAHEAD` | Свечей вперёд для генерации меток | `8` |
-| `ML_THRESHOLD` | Порог доходности ±% для BUY/SELL | `0.007` |
-| `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `50` |
-| `ML_OPTUNA_TRIALS_ET` | Итераций Optuna для ExtraTreesClassifier | `30` |
-| `ML_OPTUNA_TRIALS_SVC` | Итераций Optuna для SVC (Platt scaling — держать ≤ 20) | `20` |
-| `ML_FEATURE_IMPORTANCE_THRESHOLD` | Порог importance для отбора признаков per-ticker (`0.0` = отключить) | `0.01` |
-| `ML_PRINT_FEATURE_IMPORTANCE` | Выводить таблицу важности признаков после обучения | `false` |
-| `ML_FORCE_TUNE` | Принудительный перезапуск Optuna | `false` |
+2. **Проход 2** — CV-оценка и финальный `fit` только на отобранных признаках. Список
+   сохраняется в `features_{ticker}_{version}.json`.
 
-### Ночное дообучение
-
-Каждую ночь в `RETRAIN_HOUR:RETRAIN_MINUTE` (по `RETRAIN_TIMEZONE`) бот автоматически:
-
-1. **Собирает новые свечи** — инкрементально, только с момента последней записи в БД
-2. **Переобучает per-ticker ансамбли** — на всех накопленных данных; Optuna HPO пропускается (используется кеш `best_params_*.json`)
-3. **Сбрасывает in-memory кеш** — следующий сигнал берётся из обновлённых весов
-4. **Отправляет уведомление в Telegram** — список обученных тикеров и ошибок
-
-| Переменная | Описание | По умолчанию |
-|---|---|---|
-| `RETRAIN_ENABLED` | Включить ночное дообучение | `true` |
-| `RETRAIN_HOUR` | Час запуска (0–23) | `2` |
-| `RETRAIN_MINUTE` | Минута запуска (0–59) | `0` |
-| `RETRAIN_TIMEZONE` | Часовой пояс (IANA) | `Europe/Moscow` |
-| `RETRAIN_FORCE_TUNE` | Перезапустить Optuna HPO (занимает часы) | `false` |
-
-> Для отключения установить `RETRAIN_ENABLED=false` в `.env`.
-
-### Визуализация обучения
-
-При запуске `python -m scripts.train_model` прогресс отображается в терминале:
+Каждый тикер получает **свой** набор признаков:
 
 ```
-════════════════════════════════════════════════════════
-  [1/3] SBER  (12450 строк)
-════════════════════════════════════════════════════════
-    LightGBM HPO      [████████████████████]  50/ 50 | best F1=0.4821
-    ExtraTrees HPO    [████████████████████]  30/ 30 | best F1=0.4612
-    SVC HPO           [████████████████████]  20/ 20 | best F1=0.4401
-  ▶ Отбор признаков (проход 1 из 2, порог ≥0.01)... ✓  38 из 52 признаков (−14)
-  ▶ CV оценка ансамбля... ✓  F1=0.4891
-  ▶ Финальное обучение ансамбля... ✓
-  Сохранено: ensemble_SBER_v2.pkl
-
-════════════════════════════════════════════════════════
-  ИТОГ: 3/3 тикеров обучено
-    ✓ SBER     → ensemble_SBER_v2.pkl
-    ✓ GAZP     → ensemble_GAZP_v2.pkl
-    ✓ LKOH     → ensemble_LKOH_v2.pkl
-════════════════════════════════════════════════════════
+features_SBER_v2.json  → ["OBV", "cmf_20", "vwap_ratio", ...]   # 38 признаков
+features_LKOH_v2.json  → ["high_252_ratio", "MACD_hist", ...]   # 31 признак
+features_YDEX_v2.json  → ["hist_vol_20", "donchian_pct", ...]   # 35 признаков
 ```
 
-Чтобы дополнительно увидеть таблицу важности признаков после каждого тикера — установить `ML_PRINT_FEATURE_IMPORTANCE=true` в `.env`.
+Инференс загружает `features_{ticker}_{version}.json` автоматически — изменений в коде не требуется.
 
-Гиперпараметры кешируются в `ml/weights/best_params_{model}_{ticker}_{version}.json`.
-При повторном запуске без `--force-tune` HPO пропускается — используется кеш.
+### Признаки (52 штуки)
 
-### ML-признаки
-
-Все 52 признака нормализованы — не зависят от абсолютного уровня цены тикера.
+Все признаки нормализованы — не зависят от абсолютного уровня цены тикера.
 Это обеспечивает стационарность и корректное дообучение при росте или падении цены со временем.
 
 | Группа | Признак | Описание |
@@ -279,124 +197,45 @@ we_trust_in_people/
 | Временные | `hour_sin`, `hour_cos` | Циклическое кодирование часа МСК (23:00 и 00:00 — соседние точки) |
 | Временные | `dayofweek_sin`, `dayofweek_cos` | Циклическое кодирование дня недели (0=Пн, 4=Пт) |
 
-### Per-ticker отбор признаков
+### Ночное дообучение
 
-Обучение проходит в **два прохода**:
+Каждую ночь в `RETRAIN_HOUR:RETRAIN_MINUTE` (по `RETRAIN_TIMEZONE`) бот автоматически:
 
-1. **Проход 1** — быстрый `fit` ансамбля на всех 52 признаках. Вычисляется нормализованная importance для каждой модели (LightGBM и ExtraTrees независимо нормализуются к сумме = 1, затем усредняются; SVC не имеет `feature_importances_` и в этом проходе пропускается). Признаки с `avg_importance < ML_FEATURE_IMPORTANCE_THRESHOLD` отбрасываются.
+1. **Собирает новые свечи** — инкрементально, только с момента последней записи в БД
+2. **Переобучает per-ticker ансамбли** — на всех накопленных данных; Optuna HPO пропускается (используется кеш `best_params_*.json`)
+3. **Сбрасывает in-memory кеш** — следующий сигнал берётся из обновлённых весов
+4. **Отправляет уведомление в Telegram** — список обученных тикеров и ошибок
 
-2. **Проход 2** — CV-оценка и финальный `fit` только на отобранных признаках. Список сохраняется в `features_{ticker}_{version}.json`.
+### Визуализация обучения
 
-Каждый тикер получает **свой** набор признаков:
-
-```
-features_SBER_v2.json  → ["OBV", "cmf_20", "vwap_ratio", ...]   # 38 признаков
-features_LKOH_v2.json  → ["high_252_ratio", "MACD_hist", ...]   # 31 признак
-features_YDEX_v2.json  → ["hist_vol_20", "donchian_pct", ...]   # 35 признаков
-```
-
-Инференс загружает `features_{ticker}_{version}.json` и использует только нужные признаки без каких-либо изменений в коде.
-
-### Архитектура ансамбля
-
-Ансамбль использует `VotingClassifier(voting='soft')` — усреднение вероятностей базовых моделей.
-Каждая базовая модель обёрнута в `Pipeline(StandardScaler)`:
-
-```python
-VotingClassifier(
-    estimators=[
-        Pipeline([("scaler", StandardScaler()), ("model", LGBMClassifier(...))]),
-        Pipeline([("scaler", StandardScaler()), ("model", ExtraTreesClassifier(...))]),
-        Pipeline([("scaler", StandardScaler()), ("model", SVC(kernel="rbf", probability=True, ...))]),
-    ],
-    voting="soft",  # усреднение вероятностей, а не голосование классами
-)
-```
-
-**Почему ExtraTrees, а не RandomForest:** ET использует случайные пороги разбиений вместо
-поиска лучшего — корреляция с LightGBM значительно ниже, ансамбль получает реальное разнообразие.
-RandomForest давал эффект хуже каждой модели по отдельности из-за высокой корреляции с LightGBM.
-
-**Почему SVC (RBF):** принципиально иной алгоритм — максимальный зазор в признаковом пространстве.
-Хорошо работает там, где деревья дают нечёткую границу. `probability=True` включает Platt scaling
-для получения вероятностей (нужно для soft voting), из-за чего HPO медленнее — рекомендуется
-`ML_OPTUNA_TRIALS_SVC ≤ 20`. SVC не имеет `feature_importances_` → отбор признаков (проход 1)
-опирается только на LightGBM и ExtraTrees; SVC получает уже отобранные признаки в проходе 2.
-
-`StackingClassifier` не подходит для временных рядов: его внутренний `cv=StratifiedKFold`
-перемешивает данные → утечка будущего в OOF → мета-модель деградирует на честном `TimeSeriesSplit`.
-Весь ансамбль сохраняется в одном `.pkl` файле.
-
-> **Важно:** после изменения набора признаков (`features.py`) или структуры ансамбля
-> необходимо запустить `python -m scripts.train_model --force-tune` —
-> Optuna подберёт гиперпараметры под новый набор признаков.
-
-### Redis
-
-| Переменная | Описание | По умолчанию |
-|---|---|---|
-| `REDIS_HOST` | Хост Redis | `localhost` |
-| `REDIS_PORT` | Порт Redis | `6379` |
-| `REDIS_SIGNAL_TTL` | TTL кеша сигналов (сек) | `60` |
-| `REDIS_CANDLES_TTL` | TTL кеша свечей (сек) | `300` |
-| `REDIS_PORTFOLIO_TTL` | TTL кеша портфеля (сек) | `60` |
-| `REDIS_PRICE_TTL` | TTL кеша цен (сек) | `30` |
-| `REDIS_DIVIDEND_TTL` | TTL кеша дивидендных выплат (сек) | `86400` |
-
-### Автоторговля
-
-| Переменная | Описание | По умолчанию |
-|---|---|---|
-| `TRADING_ENABLED` | Включить автоторговлю | `false` |
-| `TRADING_CONFIDENCE_THRESHOLD` | Мин. уверенность модели для BUY | `0.65` |
-| `TRADING_LOTS_PER_TICKER` | Лотов на каждую сделку | `1` |
-| `TRADING_STOP_LOSS_PCT` | Целевой чистый убыток для стоп-лосса (после комиссий) | `0.03` |
-| `TRADING_TAKE_PROFIT_PCT` | Целевая чистая прибыль для тейк-профита (после комиссий и НДФЛ) | `0.05` |
-| `TRADING_MAX_POSITIONS` | Макс. одновременных позиций | `5` |
-| `TRADING_INTERVAL_SECONDS` | Интервал проверки сигналов (сек) | `3600` |
-| `TRADING_CHAT_ID` | Telegram chat_id для уведомлений | — |
-| `TRADING_BROKER_COMMISSION_PCT` | Комиссия брокера за сделку | `0.003` |
-| `TRADING_TAX_PCT` | НДФЛ на прибыль от продажи | `0.13` |
-| `TRADING_DIVIDEND_PROTECTION_DAYS` | Дней защиты SL после экс-даты (глобальный фоллбэк) | `1` |
-| `TRADING_DIVIDEND_OVERRIDE` | Ручные окна защиты по тикерам (`SBER:45,GAZP:90`) | — |
-| `TRADING_VOLUME_MIN_RATIO` | Мин. `volume_ratio` для подтверждения BUY (`1.0` = отключён) | `1.0` |
-
-### Фильтр подтверждения объёмом
-
-BUY-сигнал открывает позицию только если объём последнего бара превышает SMA_20(объём) на заданный коэффициент:
+При запуске `python -m scripts.train_model` прогресс отображается в терминале:
 
 ```
-volume_ratio = volume_last_bar / SMA_20(volume)
+════════════════════════════════════════════════════════
+  [1/3] SBER  (12450 строк)
+════════════════════════════════════════════════════════
+    LightGBM HPO      [████████████████████]  50/ 50 | best F1=0.4821
+    ExtraTrees HPO    [████████████████████]  30/ 30 | best F1=0.4612
+    SVC HPO           [████████████████████]  20/ 20 | best F1=0.4401
+  ▶ Отбор признаков (проход 1 из 2, порог ≥0.01)... ✓  38 из 52 признаков (−14)
+  ▶ CV оценка ансамбля... ✓  F1=0.4891
+  ▶ Финальное обучение ансамбля... ✓
+  Сохранено: ensemble_SBER_v2.pkl
 
-BUY + confidence >= threshold + volume_ratio >= TRADING_VOLUME_MIN_RATIO → открыть позицию
-BUY + volume_ratio < TRADING_VOLUME_MIN_RATIO → пропустить (лог: "объём ниже порога")
+════════════════════════════════════════════════════════
+  ИТОГ: 3/3 тикеров обучено
+    ✓ SBER     → ensemble_SBER_v2.pkl
+    ✓ GAZP     → ensemble_GAZP_v2.pkl
+    ✓ LKOH     → ensemble_LKOH_v2.pkl
+════════════════════════════════════════════════════════
 ```
 
-Повышенный объём подтверждает что за движением стоят крупные участники, а не случайное колебание.
-Рекомендуемые значения: `1.0` (отключён) → `1.1` (мягкий) → `1.3` (умеренный) → `1.5` (строгий).
+Чтобы увидеть таблицу важности признаков после каждого тикера — установить `ML_PRINT_FEATURE_IMPORTANCE=true` в `.env`.
 
-## Портфель
+Гиперпараметры кешируются в `ml/weights/best_params_{model}_{ticker}_{version}.json`.
+При повторном запуске без `--force-tune` HPO пропускается — используется кеш.
 
-### Сводная страница
-
-При открытии раздела «Портфель» отображается:
-- Общая стоимость счёта (активы + свободный остаток)
-- Свободный рублёвый баланс
-- Итоговая стоимость по каждой категории
-
-### Детализация по категориям
-
-Четыре кнопки для перехода в список активов:
-
-| Кнопка | Тип инструмента | Показывает |
-|---|---|---|
-| 📈 Акции | `share` | Тикер, кол-во шт., ср. цена покупки, текущая цена, P&L |
-| 📄 Облигации | `bond` | Тикер, кол-во шт., ср. цена покупки, текущая цена, P&L |
-| 🏦 ETF | `etf` | Тикер, кол-во шт., ср. цена покупки, текущая цена, P&L |
-| 💱 Валюта | `currency` | Валюта, объём, ср. цена покупки, текущая цена, P&L |
-
-Тикер определяется по FIGI из таблицы `assets` в БД.
-Для активов вне отслеживаемого списка отображается FIGI[:10].
+---
 
 ## Торговля
 
@@ -446,7 +285,21 @@ SL = 10% чистых → цена должна упасть на −9.42% (gros
 При наличии нескольких открытых позиций по одному активу всегда продаётся
 самая ранняя (по дате открытия).
 
-## Дивидендная защита стоп-лосса
+### Фильтр подтверждения объёмом
+
+BUY-сигнал открывает позицию только если объём последнего бара превышает SMA_20(объём) на заданный коэффициент:
+
+```
+volume_ratio = volume_last_bar / SMA_20(volume)
+
+BUY + confidence >= threshold + volume_ratio >= TRADING_VOLUME_MIN_RATIO → открыть позицию
+BUY + volume_ratio < TRADING_VOLUME_MIN_RATIO → пропустить (лог: "объём ниже порога")
+```
+
+Повышенный объём подтверждает что за движением стоят крупные участники, а не случайное колебание.
+Рекомендуемые значения: `1.0` (отключён) → `1.1` (мягкий) → `1.3` (умеренный) → `1.5` (строгий).
+
+### Дивидендная защита стоп-лосса
 
 Когда компания выплачивает дивиденды, акция предсказуемо падает примерно на
 сумму дивиденда в экс-дивидендный день. Чтобы это не вызвало ложное срабатывание
@@ -456,8 +309,6 @@ SL = 10% чистых → цена должна упасть на −9.42% (gros
 effective_sl = stop_loss_price - dividend_per_share
 ```
 
-### Индивидуальное окно защиты
-
 Для каждой акции автоматически вычисляется среднее количество дней, за которые
 дивидендный гэп исторически закрывался (данные за 5 лет, дневные свечи):
 
@@ -466,13 +317,34 @@ effective_sl = stop_loss_price - dividend_per_share
 3. Среднее (ceiling) сохраняется в PostgreSQL (`assets.dividend_gap_days`)
 4. Пересчёт — раз в 30 дней или при первом добавлении актива
 
-### Приоритет источников
-
 | Приоритет | Источник | Как задать |
 |---|---|---|
 | 1 (высший) | Ручное переопределение | `TRADING_DIVIDEND_OVERRIDE=SBER:45,GAZP:90` |
 | 2 | PostgreSQL (`assets.dividend_gap_days`) | Авто или `UPDATE assets SET ...` |
 | 3 | Глобальный фоллбэк | `TRADING_DIVIDEND_PROTECTION_DAYS=1` |
+
+---
+
+## Портфель
+
+При открытии раздела «Портфель» отображается:
+- Общая стоимость счёта (активы + свободный остаток)
+- Свободный рублёвый баланс
+- Итоговая стоимость по каждой категории
+
+Четыре кнопки для перехода в список активов:
+
+| Кнопка | Тип инструмента | Показывает |
+|---|---|---|
+| 📈 Акции | `share` | Тикер, кол-во шт., ср. цена покупки, текущая цена, P&L |
+| 📄 Облигации | `bond` | Тикер, кол-во шт., ср. цена покупки, текущая цена, P&L |
+| 🏦 ETF | `etf` | Тикер, кол-во шт., ср. цена покупки, текущая цена, P&L |
+| 💱 Валюта | `currency` | Валюта, объём, ср. цена покупки, текущая цена, P&L |
+
+Тикер определяется по FIGI из таблицы `assets` в БД.
+Для активов вне отслеживаемого списка отображается FIGI[:10].
+
+---
 
 ## Redis-кеш
 
@@ -487,6 +359,167 @@ effective_sl = stop_loss_price - dividend_per_share
 | Последние цены | `last_price:{instrument_id}` | `REDIS_PRICE_TTL` |
 | Дивидендные выплаты | `dividend_drop:{figi}:{date}:{days}` | `REDIS_DIVIDEND_TTL` |
 
+---
+
+## Настройки `.env`
+
+Все параметры настраиваются через `.env` (скопировать из `.env.example`).
+
+### Tinkoff API
+
+| Переменная | Описание | По умолчанию |
+|---|---|---|
+| `TINKOFF_TOKEN` | API-токен Tinkoff Invest | — |
+| `TINKOFF_ACCOUNT_ID` | ID счёта | — |
+| `TINKOFF_SANDBOX` | Режим песочницы | `false` |
+| `TINKOFF_POST_ORDER_RATE` | Лимит PostOrder (заявок/сек) | `15` |
+
+### Сбор данных
+
+| Переменная | Описание | По умолчанию |
+|---|---|---|
+| `DATA_TICKERS` | Тикеры через запятую | `SBER,GAZP,...` |
+| `DATA_CANDLE_INTERVAL` | Интервал свечей (`1h`, `1d`, `15min`) | `1h` |
+| `DATA_HISTORY_DAYS` | Глубина истории при первом запуске | `365` |
+
+### ML
+
+| Переменная | Описание | По умолчанию |
+|---|---|---|
+| `ML_MODEL_VERSION` | Суффикс файлов весов | `v2` |
+| `ML_LOOKAHEAD` | Свечей вперёд для генерации меток | `8` |
+| `ML_THRESHOLD` | Порог доходности ±% для BUY/SELL | `0.007` |
+| `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `50` |
+| `ML_OPTUNA_TRIALS_ET` | Итераций Optuna для ExtraTreesClassifier | `30` |
+| `ML_OPTUNA_TRIALS_SVC` | Итераций Optuna для SVC (Platt scaling — держать ≤ 20) | `20` |
+| `ML_FEATURE_IMPORTANCE_THRESHOLD` | Порог importance для отбора признаков per-ticker (`0.0` = отключить) | `0.01` |
+| `ML_PRINT_FEATURE_IMPORTANCE` | Выводить таблицу важности признаков после обучения | `false` |
+| `ML_FORCE_TUNE` | Принудительный перезапуск Optuna | `false` |
+
+### Ночное дообучение
+
+| Переменная | Описание | По умолчанию |
+|---|---|---|
+| `RETRAIN_ENABLED` | Включить ночное дообучение | `true` |
+| `RETRAIN_HOUR` | Час запуска (0–23) | `2` |
+| `RETRAIN_MINUTE` | Минута запуска (0–59) | `0` |
+| `RETRAIN_TIMEZONE` | Часовой пояс (IANA) | `Europe/Moscow` |
+| `RETRAIN_FORCE_TUNE` | Перезапустить Optuna HPO (занимает часы) | `false` |
+
+### Redis
+
+| Переменная | Описание | По умолчанию |
+|---|---|---|
+| `REDIS_HOST` | Хост Redis | `localhost` |
+| `REDIS_PORT` | Порт Redis | `6379` |
+| `REDIS_SIGNAL_TTL` | TTL кеша сигналов (сек) | `60` |
+| `REDIS_CANDLES_TTL` | TTL кеша свечей (сек) | `300` |
+| `REDIS_PORTFOLIO_TTL` | TTL кеша портфеля (сек) | `60` |
+| `REDIS_PRICE_TTL` | TTL кеша цен (сек) | `30` |
+| `REDIS_DIVIDEND_TTL` | TTL кеша дивидендных выплат (сек) | `86400` |
+
+### Автоторговля
+
+| Переменная | Описание | По умолчанию |
+|---|---|---|
+| `TRADING_ENABLED` | Включить автоторговлю | `false` |
+| `TRADING_CONFIDENCE_THRESHOLD` | Мин. уверенность модели для BUY | `0.65` |
+| `TRADING_LOTS_PER_TICKER` | Лотов на каждую сделку | `1` |
+| `TRADING_STOP_LOSS_PCT` | Целевой чистый убыток для стоп-лосса (после комиссий) | `0.03` |
+| `TRADING_TAKE_PROFIT_PCT` | Целевая чистая прибыль для тейк-профита (после комиссий и НДФЛ) | `0.05` |
+| `TRADING_MAX_POSITIONS` | Макс. одновременных позиций | `5` |
+| `TRADING_INTERVAL_SECONDS` | Интервал проверки сигналов (сек) | `3600` |
+| `TRADING_CHAT_ID` | Telegram chat_id для уведомлений | — |
+| `TRADING_BROKER_COMMISSION_PCT` | Комиссия брокера за сделку | `0.003` |
+| `TRADING_TAX_PCT` | НДФЛ на прибыль от продажи | `0.13` |
+| `TRADING_DIVIDEND_PROTECTION_DAYS` | Дней защиты SL после экс-даты (глобальный фоллбэк) | `1` |
+| `TRADING_DIVIDEND_OVERRIDE` | Ручные окна защиты по тикерам (`SBER:45,GAZP:90`) | — |
+| `TRADING_VOLUME_MIN_RATIO` | Мин. `volume_ratio` для подтверждения BUY (`1.0` = отключён) | `1.0` |
+
+---
+
+## Docker
+
+| Сервис | Образ | Роль |
+|---|---|---|
+| `postgres` | `postgres:15-alpine` | PostgreSQL (данные в named volume `postgres_data`) |
+| `redis` | `redis:7-alpine` | Redis-кеш (данные в named volume `redis_data`) |
+| `bot` | сборка из `Dockerfile` | Telegram-бот + автоторговля |
+
+Сервисы `postgres` и `redis` имеют healthcheck; бот стартует только после их готовности.
+Директория `ml/weights/` смонтирована как bind-mount — веса не теряются при пересборке образа.
+
+Все переменные берутся из `.env` через `env_file`. Два параметра переопределяются автоматически:
+
+```yaml
+POSTGRES_HOST: postgres   # внутри Docker — имя сервиса, не localhost
+REDIS_HOST: redis
+```
+
+---
+
+## Структура проекта
+
+```
+we_trust_in_people/
+├── config/
+│   └── settings.py          # Pydantic Settings: все параметры из .env
+├── db/
+│   ├── models.py            # ORM-модели: Asset, Candle, Signal, Trade
+│   ├── database.py          # Async engine, get_session()
+│   ├── candle_repo.py       # CRUD для активов и свечей
+│   └── trade_repo.py        # CRUD для сделок (FIFO-порядок)
+├── tinkoff/
+│   ├── client.py            # Async gRPC клиент (t-tech-investments)
+│   ├── market_data.py       # Свечи, последние цены (кеш Redis)
+│   ├── instruments.py       # Поиск инструмента по тикеру, lot_size
+│   ├── rate_limiter.py      # Rate limiter (TINKOFF_POST_ORDER_RATE)
+│   ├── portfolio.py         # Портфель, баланс, рыночные ордера
+│   ├── dividends.py         # Размер дивиденда в окне защиты (кеш Redis 24 ч)
+│   └── dividend_gap_stats.py # Статистика закрытия дивидендного гэпа (PostgreSQL)
+├── ml/
+│   ├── features.py          # Feature engineering (52 признака, TA-Lib)
+│   ├── dataset.py           # Загрузка данных из БД (кеш Redis)
+│   ├── train.py             # Обучение per-ticker ансамблей + Optuna HPO + прогресс
+│   ├── tune.py              # Optuna HPO для LightGBM / ExtraTrees / SVC
+│   ├── predict.py           # Инференс, predict_all() (кеш Redis)
+│   └── weights/             # Веса моделей (не в репозитории): ensemble_{ticker}_{version}.pkl
+├── trading/
+│   ├── __init__.py
+│   ├── state.py             # Runtime-флаг авто/ручной режим
+│   ├── profitability.py     # Расчёт P&L: комиссии + НДФЛ + безубыток
+│   ├── executor.py          # Открытие/закрытие позиций через Tinkoff API
+│   ├── scheduler.py         # Главный цикл автоторговли (asyncio task)
+│   ├── retrain_scheduler.py # Ночное дообучение ML-моделей (asyncio task)
+│   └── notifier.py          # Telegram-уведомления о сделках и дообучении
+├── bot/
+│   ├── main.py              # Точка входа бота, запуск scheduler
+│   ├── keyboards.py         # Все inline-клавиатуры
+│   └── handlers/
+│       ├── main.py          # Главное меню
+│       ├── signals.py       # ML-сигналы по тикерам
+│       ├── portfolio.py     # Портфель: сводка + акции/облигации/ETF/валюта
+│       └── trading.py       # Торговля: авто/ручной, позиции, история
+├── agents/
+│   ├── coder.py             # Agent 1: пишет код
+│   ├── reviewer.py          # Agent 2: ревьюит код
+│   └── architect.py         # Agent 3: валидирует по спецификации
+├── scripts/
+│   ├── collect_candles.py   # Сбор исторических свечей
+│   ├── train_model.py       # Обучение ML-модели
+│   └── run_bot.py           # Запуск Telegram-бота
+├── utils/
+│   ├── logger.py            # Structured logging (structlog)
+│   └── redis_cache.py       # Redis синглтон: init/get/close
+├── alembic/                 # Миграции БД
+├── Dockerfile
+├── docker-compose.yml
+├── .env.example             # Пример конфигурации
+└── CLAUDE.md                # Правила проекта для AI-ассистента
+```
+
+---
+
 ## 3-агентная система
 
 Экспериментальный модуль для ассистирования в разработке:
@@ -497,26 +530,7 @@ effective_sl = stop_loss_price - dividend_per_share
 
 Требует `ANTHROPIC_API_KEY` в `.env`.
 
-## Docker
-
-### Структура сервисов
-
-| Сервис | Образ | Роль |
-|---|---|---|
-| `postgres` | `postgres:15-alpine` | PostgreSQL (данные в named volume `postgres_data`) |
-| `redis` | `redis:7-alpine` | Redis-кеш (данные в named volume `redis_data`) |
-| `bot` | сборка из `Dockerfile` | Telegram-бот + автоторговля |
-
-Сервисы `postgres` и `redis` имеют healthcheck; бот стартует только после их готовности.
-
-### Переменные окружения в Docker
-
-Все переменные берутся из `.env` через `env_file`. Два параметра переопределяются автоматически:
-
-```yaml
-POSTGRES_HOST: postgres   # внутри Docker — имя сервиса, не localhost
-REDIS_HOST: redis
-```
+---
 
 ## Важные ограничения
 
