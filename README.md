@@ -33,42 +33,63 @@
 | Логирование | structlog |
 | Агенты | Anthropic API (claude-opus-4-6) |
 
-## Установка
+## Быстрый старт
+
+### 1. Клонировать репозиторий и настроить `.env`
 
 ```bash
-# 1. Клонировать репозиторий
 git clone https://github.com/LehaDeev/we_trust_in_people.git
 cd we_trust_in_people
 
-# 2. Создать виртуальное окружение
+cp .env.example .env
+# Вписать в .env:
+#   TINKOFF_TOKEN, TINKOFF_ACCOUNT_ID
+#   TELEGRAM_BOT_TOKEN
+#   POSTGRES_PASSWORD
+```
+
+### 2. Обучить ML-модели (на хосте, вне Docker)
+
+Обучение ресурсоёмкое — выполняется один раз на хосте, веса монтируются в контейнер.
+
+```bash
+# Установить зависимости (URL реестра TBank прописан в requirements.txt)
 python -m venv venv
 source venv/bin/activate  # Windows: venv\Scripts\activate
-
-# 3. Установить зависимости (URL реестра TBank уже прописан в requirements.txt)
 pip install -r requirements.txt
 
-# 4. Настроить переменные окружения
-cp .env.example .env
-# Отредактировать .env — вписать токены, данные для подключения к БД и Redis
-
-# 5. Применить миграции БД
-alembic upgrade head
-
-# 6. Собрать исторические данные
+# Собрать исторические данные
 python -m scripts.collect_candles
 
-# 7. Обучить ML-модели (отдельный ансамбль для каждого тикера)
+# Обучить ансамбли (LightGBM + ExtraTrees + SVC) для каждого тикера
 python -m scripts.train_model
-# Для принудительного повтора Optuna HPO:
-# python -m scripts.train_model --force-tune
+# При повторном запуске HPO пропускается — используются кешированные best_params_*.json
+# Для принудительного повтора Optuna: python -m scripts.train_model --force-tune
 #
 # --force-tune ОБЯЗАТЕЛЕН после:
 #   - изменения набора признаков (features.py)
 #   - изменения структуры модели (Pipeline, estimator)
 #   - удаления старых файлов best_params_*.json
+```
 
-# 8. Запустить Telegram-бот (включает автоторговлю)
-python -m scripts.run_bot
+Веса сохраняются в `ml/weights/` — Docker монтирует эту директорию автоматически.
+
+### 3. Запустить через Docker Compose
+
+```bash
+docker compose up -d
+
+# Логи бота
+docker compose logs -f bot
+```
+
+При первом запуске `docker-entrypoint.sh` применяет миграции Alembic, затем стартует бот.
+PostgreSQL и Redis поднимаются вместе; бот ждёт их healthcheck перед стартом.
+
+### Пересборка после изменений кода
+
+```bash
+docker compose up -d --build
 ```
 
 ## Структура проекта
@@ -478,22 +499,6 @@ effective_sl = stop_loss_price - dividend_per_share
 
 ## Docker
 
-### Быстрый старт
-
-```bash
-# 1. Скопировать и заполнить .env
-cp .env.example .env
-# Вписать TINKOFF_TOKEN, TINKOFF_ACCOUNT_ID, TELEGRAM_BOT_TOKEN, POSTGRES_PASSWORD
-
-# 2. Поднять все сервисы (postgres + redis + bot)
-docker compose up -d
-
-# 3. Посмотреть логи бота
-docker compose logs -f bot
-```
-
-При первом запуске `docker-entrypoint.sh` автоматически применяет миграции Alembic (`alembic upgrade head`), затем стартует бота.
-
 ### Структура сервисов
 
 | Сервис | Образ | Роль |
@@ -503,27 +508,6 @@ docker compose logs -f bot
 | `bot` | сборка из `Dockerfile` | Telegram-бот + автоторговля |
 
 Сервисы `postgres` и `redis` имеют healthcheck; бот стартует только после их готовности.
-
-### Веса ML-моделей
-
-Модели обучаются **вне Docker** (обучение тяжёлое, занимает время):
-
-```bash
-# На хосте: собрать данные и обучить модели
-python -m scripts.collect_candles
-python -m scripts.train_model
-
-# Веса уже лежат в ./ml/weights/ — они автоматически монтируются в контейнер:
-# ./ml/weights → /app/ml/weights
-```
-
-Директория `ml/weights/` смонтирована как bind-mount — веса не теряются при пересборке образа.
-
-### Пересборка после изменений кода
-
-```bash
-docker compose up -d --build
-```
 
 ### Переменные окружения в Docker
 
