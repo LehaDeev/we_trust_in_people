@@ -45,7 +45,7 @@ def _make_progress_callback(n_trials: int, label: str):
     def callback(study: optuna.Study, trial: optuna.trial.FrozenTrial) -> None:
         done = trial.number + 1
         filled = int(_BAR_WIDTH * done / n_trials)
-        bar = "█" * filled + "░" * (_BAR_WIDTH - filled)
+        bar = "#" * filled + "." * (_BAR_WIDTH - filled)
         best = study.best_value if study.best_trial else 0.0
         print(
             f"\r    {label:<14} [{bar}] {done:>3}/{n_trials} | best F1={best:.4f}",

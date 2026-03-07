@@ -35,7 +35,7 @@ from utils.logger import logger
 
 WEIGHTS_DIR = Path(__file__).parent / "weights"
 
-_SEP = "═" * 56
+_SEP = "=" * 56
 
 
 # ── Вывод прогресса в терминал ───────────────────────────────────────────────
@@ -49,7 +49,7 @@ def _print_ticker_header(ticker: str, index: int, total: int, samples: int) -> N
 
 def _print_step(msg: str) -> None:
     """Вывести шаг (без переноса строки — ожидается OK или новая строка)."""
-    print(f"  ▶ {msg}", end="", flush=True)
+    print(f"  > {msg}", end="", flush=True)
 
 
 def _print_cached(label: str) -> None:
@@ -60,7 +60,7 @@ def _print_cached(label: str) -> None:
 def _print_ok(extra: str = "") -> None:
     """Вывести ✓ после _print_step."""
     suffix = f"  {extra}" if extra else ""
-    print(f" ✓{suffix}", flush=True)
+    print(f" ok{suffix}", flush=True)
 
 
 def _print_summary(results: dict[str, Path], failed: list[str]) -> None:
@@ -68,9 +68,9 @@ def _print_summary(results: dict[str, Path], failed: list[str]) -> None:
     print(f"\n{_SEP}", flush=True)
     print(f"  ИТОГ: {len(results)}/{len(results) + len(failed)} тикеров обучено", flush=True)
     for ticker, path in results.items():
-        print(f"    ✓ {ticker:<8} → {path.name}", flush=True)
+        print(f"    + {ticker:<8} -> {path.name}", flush=True)
     for ticker in failed:
-        print(f"    ✗ {ticker:<8} — ошибка (см. лог)", flush=True)
+        print(f"    x {ticker:<8} -- error (see log)", flush=True)
     print(_SEP, flush=True)
 
 
@@ -255,7 +255,7 @@ def _print_feature_importance(
     max_imp = sorted_feats[0][1] if sorted_feats else 1.0
     print(f"\n  Признаки [{ticker}] по важности:", flush=True)
     for i, (feat, imp) in enumerate(sorted_feats, 1):
-        bar = "█" * int(imp / max_imp * 30)
+        bar = "#" * int(imp / max_imp * 30)
         print(f"    {i:>2}. {feat:<25} {bar} {imp:.4f}", flush=True)
 
 
@@ -333,12 +333,12 @@ def _train_single_ticker(
     # для банков (SBER), нефтяников (LKOH), IT-компаний (YDEX) и т.д.
     # CV-оценка и финальный фит выполняются уже на отобранных признаках.
     if threshold > 0.0:
-        _print_step(f"Отбор признаков (проход 1 из 2, порог ≥{threshold})...")
+        _print_step(f"Отбор признаков (проход 1 из 2, порог >={threshold})...")
         probe = _make_ensemble()
         probe.fit(X, y)
         selected_features = _select_by_threshold(probe, all_features, threshold)
         dropped = len(all_features) - len(selected_features)
-        _print_ok(f"{len(selected_features)} из {len(all_features)} признаков (−{dropped})")
+        _print_ok(f"{len(selected_features)} из {len(all_features)} признаков (-{dropped})")
         X_final = X[selected_features]
     else:
         # Отбор отключён — берём все признаки
@@ -418,7 +418,7 @@ async def train_model(force_tune: bool = False) -> dict[str, Path]:
             results[ticker] = path
         except Exception as e:
             logger.error("Ошибка обучения тикера", ticker=ticker, error=str(e))
-            print(f"  ✗ Ошибка: {e}", flush=True)
+            print(f"  x Error: {e}", flush=True)
 
     failed = [t for t in data_settings.tickers if t not in results]
     _print_summary(results, failed)
