@@ -265,7 +265,7 @@ def _train_single_ticker(
     ticker: str,
     group: pd.DataFrame,
     force_tune: bool,
-) -> Path:
+) -> tuple[Path, float]:
     """
     Полный pipeline обучения для одного тикера.
 
@@ -372,7 +372,7 @@ def _train_single_ticker(
 
     print(f"  Сохранено: {ensemble_path.name}", flush=True)
 
-    return ensemble_path
+    return ensemble_path, cv_f1
 
 
 # ── Основная функция обучения ────────────────────────────────────────────────
@@ -405,6 +405,7 @@ async def train_model(force_tune: bool = False) -> dict[str, Path]:
         raise RuntimeError("Нет данных. Запустите scripts/collect_candles.py.")
 
     results: dict[str, Path] = {}
+    f1_scores: dict[str, float] = {}
     tickers_list = list(raw["ticker"].unique())
     total = len(tickers_list)
 
@@ -414,14 +415,30 @@ async def train_model(force_tune: bool = False) -> dict[str, Path]:
         _print_ticker_header(ticker, i, total, len(group))
         logger.info("Обучение модели", ticker=ticker)
         try:
-            path = _train_single_ticker(ticker, group, force_tune)
+            path, cv_f1 = _train_single_ticker(ticker, group, force_tune)
             results[ticker] = path
+            f1_scores[ticker] = round(cv_f1, 4)
         except Exception as e:
             logger.error("Ошибка обучения тикера", ticker=ticker, error=str(e))
             print(f"  x Error: {e}", flush=True)
 
     failed = [t for t in data_settings.tickers if t not in results]
     _print_summary(results, failed)
+
+    # Сохраняем метрики последнего обучения для быстрого просмотра
+    results_path = WEIGHTS_DIR / "last_results.json"
+    with open(results_path, "w") as f:
+        json.dump(
+            {
+                "trained_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+                "force_tune": force_tune,
+                "f1_scores": f1_scores,
+                "failed": failed,
+            },
+            f,
+            indent=2,
+        )
+    logger.info("Метрики сохранены", path=str(results_path))
 
     logger.info(
         "Обучение завершено",
