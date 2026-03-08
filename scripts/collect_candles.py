@@ -192,6 +192,21 @@ async def run_collection() -> None:
 
     logger.info("Сбор свечей завершён", processed=len(instruments))
 
+    # Собираем USD/RUB для ML-признаков (graceful degradation при ошибке)
+    try:
+        await collect_for_ticker(
+            ticker="USDRUB",
+            figi=data_settings.usdrub_figi,
+            uid=data_settings.usdrub_figi,
+            name="USD/RUB",
+            currency="RUB",
+            candle_interval=candle_interval,
+            interval_str=interval_str,
+            history_days=history_days,
+        )
+    except Exception as e:
+        logger.warning("Не удалось собрать USD/RUB свечи", error=str(e))
+
 
 async def main() -> None:
     """Запустить сбор данных по всем тикерам из настроек."""

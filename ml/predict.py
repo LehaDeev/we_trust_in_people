@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 
 from config.settings import ml_settings, redis_settings
-from ml.dataset import load_ticker_data
+from ml.dataset import load_ticker_data, load_usdrub_data, merge_usdrub
 from ml.features import compute_features
 from ml.labels import LABEL_NAMES
 from utils.logger import logger
@@ -132,6 +132,10 @@ async def predict_signal(
         )
 
     df = df.tail(ml_settings.min_candles_predict).reset_index(drop=True)
+
+    # ── Добавляем USD/RUB как признак ─────────────────────────────────────────
+    usdrub_df = await load_usdrub_data(candle_interval)
+    df = merge_usdrub(df, usdrub_df)
 
     # ── Вычисляем признаки ────────────────────────────────────────────────────
     feat_df = compute_features(df)

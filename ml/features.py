@@ -72,6 +72,11 @@ FEATURE_COLUMNS: list[str] = [
     # Первый час (10–11 МСК): высокая волатильность; обед (13–14): боковик;
     # последний час (17–18): направленное движение с объёмом
     "hour_sin", "hour_cos", "dayofweek_sin", "dayofweek_cos",
+    # ── USD/RUB курс ─────────────────────────────────────────────────────────
+    # Сильно влияет на экспортёров (GAZP, LKOH, ROSN, NVTK, GMKN).
+    # usdrub_ratio: нормализованный курс (close / SMA20) — без зависимости от уровня
+    # usdrub_change_1h: изменение курса за 1 час — прямой сигнал движения рубля
+    "usdrub_ratio", "usdrub_change_1h",
 ]
 
 
@@ -277,6 +282,18 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     df["hour_cos"]      = np.cos(2 * np.pi * hour / 24)
     df["dayofweek_sin"] = np.sin(2 * np.pi * dow / 5)
     df["dayofweek_cos"] = np.cos(2 * np.pi * dow / 5)
+
+    # ── USD/RUB курс ─────────────────────────────────────────────────────────
+    # Если данные USD/RUB не загружены — graceful degradation: признаки = 0.0.
+    # Нормализация через SMA20 убирает долгосрочный тренд и делает признак стационарным.
+    if "usdrub_close" in df.columns:
+        usdrub = df["usdrub_close"].values.astype(np.float64)
+        usdrub_sma20 = talib.SMA(usdrub, timeperiod=20)
+        df["usdrub_ratio"] = np.where(usdrub_sma20 > 0, usdrub / usdrub_sma20, 1.0)
+        df["usdrub_change_1h"] = pd.Series(usdrub).pct_change(1).fillna(0.0).values
+    else:
+        df["usdrub_ratio"] = 0.0
+        df["usdrub_change_1h"] = 0.0
 
     # Удаляем строки где хотя бы один признак NaN (период прогрева, ~50 строк на тикер)
     df = df.dropna(subset=FEATURE_COLUMNS).reset_index(drop=True)

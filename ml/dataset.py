@@ -109,6 +109,64 @@ async def load_ticker_data(
     return df
 
 
+async def load_usdrub_data(interval: str = "1h") -> pd.DataFrame:
+    """
+    Загрузить свечи USD/RUB из БД.
+
+    Возвращает DataFrame с колонками [time, open, high, low, close, volume]
+    или пустой DataFrame если данные не собраны.
+    """
+    return await load_ticker_data("USDRUB", interval)
+
+
+def merge_usdrub(df: pd.DataFrame, usdrub_df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Добавить колонку usdrub_close к DataFrame со свечами тикера.
+
+    Использует merge_asof по времени (backward — последнее известное значение).
+    При пустом usdrub_df — graceful degradation: колонка заполняется нулями.
+
+    Аргументы:
+        df:        DataFrame тикера с колонкой time.
+        usdrub_df: DataFrame USD/RUB с колонками [time, close].
+
+    Возвращает:
+        df с добавленной колонкой usdrub_close.
+    """
+    df = df.copy()
+
+    if usdrub_df.empty:
+        df["usdrub_close"] = 0.0
+        return df
+
+    def _to_naive_utc(s: pd.Series) -> pd.Series:
+        """Привести timestamps к наивному UTC для корректного merge."""
+        s = pd.to_datetime(s)
+        if s.dt.tz is not None:
+            return s.dt.tz_convert("UTC").dt.tz_localize(None)
+        return s
+
+    df["_t"] = _to_naive_utc(df["time"])
+    usdrub = usdrub_df[["time", "close"]].copy()
+    usdrub["_t"] = _to_naive_utc(usdrub["time"])
+    usdrub = (
+        usdrub[["_t", "close"]]
+        .rename(columns={"close": "usdrub_close"})
+        .sort_values("_t")
+        .drop_duplicates("_t")
+    )
+
+    merged = pd.merge_asof(
+        df.sort_values("_t"),
+        usdrub,
+        on="_t",
+        direction="backward",
+    )
+    merged["usdrub_close"] = merged["usdrub_close"].ffill().fillna(0.0)
+    merged = merged.drop(columns=["_t"]).sort_values("time").reset_index(drop=True)
+    return merged
+
+
 async def load_all_tickers_dataset(
     tickers: list[str],
     interval: str = "1h",
@@ -132,11 +190,18 @@ async def load_all_tickers_dataset(
     """
     frames: list[pd.DataFrame] = []
 
+    # Загружаем USD/RUB один раз — мержим к каждому тикеру
+    usdrub_df = await load_usdrub_data(interval)
+    if usdrub_df.empty:
+        logger.warning("USD/RUB данные не найдены — признак usdrub будет нулевым. "
+                       "Запустите scripts/collect_candles.py для сбора данных.")
+
     for ticker in tickers:
         df = await load_ticker_data(ticker, interval)
         if df.empty:
             logger.warning("Skipping ticker — no data", ticker=ticker)
             continue
+        df = merge_usdrub(df, usdrub_df)
         df.insert(0, "ticker", ticker)
         frames.append(df)
 

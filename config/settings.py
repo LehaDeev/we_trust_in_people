@@ -82,6 +82,8 @@ class DataSettings(BaseSettings):
     candle_interval: str = Field("1h", alias="DATA_CANDLE_INTERVAL")
     # Глубина истории при первом запуске (дней)
     history_days: int = Field(365, alias="DATA_HISTORY_DAYS")
+    # FIGI инструмента USD/RUB (USDRUB_TOM на MOEX) — используется как ML-признак
+    usdrub_figi: str = Field("BBG0013HGFT4", alias="DATA_USDRUB_FIGI")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
