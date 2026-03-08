@@ -84,6 +84,9 @@ class DataSettings(BaseSettings):
     history_days: int = Field(365, alias="DATA_HISTORY_DAYS")
     # FIGI инструмента USD/RUB (USDRUB_TOM на MOEX) — используется как ML-признак
     usdrub_figi: str = Field("BBG0013HGFT4", alias="DATA_USDRUB_FIGI")
+    # Пауза между тикерами при сборе свечей (секунды). При больших объёмах данных
+    # (DATA_HISTORY_DAYS > 730) API выдаёт RESOURCE_EXHAUSTED — увеличить до 30-60.
+    collect_pause_seconds: int = Field(15, alias="DATA_COLLECT_PAUSE_SECONDS")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

@@ -18,6 +18,8 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 
+from grpc import StatusCode
+
 from config.settings import data_settings
 from db.candle_repo import (
     INTERVAL_TO_STR,
@@ -149,6 +151,60 @@ async def collect_for_ticker(
     )
 
 
+async def _collect_with_retry(
+    *,
+    ticker: str,
+    figi: str,
+    uid: str,
+    name: str,
+    currency: str,
+    candle_interval,
+    interval_str: str,
+    history_days: int,
+    warn_on_error: bool = False,
+    max_retries: int = 3,
+    retry_delay: int = 60,
+) -> None:
+    """
+    Собрать свечи для тикера с retry при RESOURCE_EXHAUSTED.
+
+    При превышении rate limit ждёт retry_delay секунд и повторяет попытку.
+    При warn_on_error=True — логирует как warning, иначе как error.
+    """
+    for attempt in range(1, max_retries + 1):
+        try:
+            await collect_for_ticker(
+                ticker=ticker,
+                figi=figi,
+                uid=uid,
+                name=name,
+                currency=currency,
+                candle_interval=candle_interval,
+                interval_str=interval_str,
+                history_days=history_days,
+            )
+            return
+        except Exception as e:
+            # Проверяем RESOURCE_EXHAUSTED по коду gRPC
+            is_rate_limit = (
+                hasattr(e, "__iter__") and
+                any(getattr(part, "value", None) == (8, "resource exhausted")
+                    for part in (e if isinstance(e, tuple) else ()))
+            )
+            if is_rate_limit and attempt < max_retries:
+                logger.warning(
+                    "Rate limit, повтор через %d сек", retry_delay,
+                    ticker=ticker, attempt=attempt,
+                )
+                await asyncio.sleep(retry_delay)
+            else:
+                if warn_on_error:
+                    logger.warning("Не удалось собрать свечи", ticker=ticker, error=str(e))
+                else:
+                    logger.error("Ошибка сбора тикера", ticker=ticker, error=str(e))
+                return
+
+
 async def run_collection() -> None:
     """
     Собрать новые свечи по всем тикерам из настроек.
@@ -175,37 +231,39 @@ async def run_collection() -> None:
     if missing:
         logger.warning("Тикеры не найдены в API", missing=missing)
 
-    for ticker, info in instruments.items():
-        try:
-            await collect_for_ticker(
-                ticker=ticker,
-                figi=info.figi,
-                uid=info.uid,
-                name=info.name,
-                currency=info.currency,
-                candle_interval=candle_interval,
-                interval_str=interval_str,
-                history_days=history_days,
-            )
-        except Exception as e:
-            logger.error("Ошибка сбора тикера", ticker=ticker, error=str(e))
+    pause = data_settings.collect_pause_seconds
+    tickers_list = list(instruments.items())
 
-    logger.info("Сбор свечей завершён", processed=len(instruments))
-
-    # Собираем USD/RUB для ML-признаков (graceful degradation при ошибке)
-    try:
-        await collect_for_ticker(
-            ticker="USDRUB",
-            figi=data_settings.usdrub_figi,
-            uid=data_settings.usdrub_figi,
-            name="USD/RUB",
-            currency="RUB",
+    for i, (ticker, info) in enumerate(tickers_list):
+        await _collect_with_retry(
+            ticker=ticker,
+            figi=info.figi,
+            uid=info.uid,
+            name=info.name,
+            currency=info.currency,
             candle_interval=candle_interval,
             interval_str=interval_str,
             history_days=history_days,
         )
-    except Exception as e:
-        logger.warning("Не удалось собрать USD/RUB свечи", error=str(e))
+        # Пауза между тикерами кроме последнего — защита от RESOURCE_EXHAUSTED
+        if i < len(tickers_list) - 1:
+            logger.debug("Пауза между тикерами", seconds=pause)
+            await asyncio.sleep(pause)
+
+    logger.info("Сбор свечей завершён", processed=len(instruments))
+
+    # Собираем USD/RUB для ML-признаков (graceful degradation при ошибке)
+    await _collect_with_retry(
+        ticker="USDRUB",
+        figi=data_settings.usdrub_figi,
+        uid=data_settings.usdrub_figi,
+        name="USD/RUB",
+        currency="RUB",
+        candle_interval=candle_interval,
+        interval_str=interval_str,
+        history_days=history_days,
+        warn_on_error=True,
+    )
 
 
 async def main() -> None:
