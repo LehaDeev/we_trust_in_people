@@ -80,8 +80,12 @@ class DataSettings(BaseSettings):
     )
     # Интервал свечей: 1min, 5min, 15min, 1h, 1d, 1w
     candle_interval: str = Field("1h", alias="DATA_CANDLE_INTERVAL")
-    # Глубина истории при первом запуске (дней)
+    # Глубина истории при первом запуске (дней) — используется если DATA_START_DATE не задана
     history_days: int = Field(365, alias="DATA_HISTORY_DAYS")
+    # Фиксированная дата начала истории (формат YYYY-MM-DD).
+    # Если задана — новые тикеры загружают данные именно с этой даты,
+    # игнорируя DATA_HISTORY_DAYS. Пустая строка = не используется.
+    start_date: str = Field("", alias="DATA_START_DATE")
     # FIGI инструмента USD/RUB (USDRUB_TOM на MOEX) — используется как ML-признак
     usdrub_figi: str = Field("BBG0013HGFT4", alias="DATA_USDRUB_FIGI")
     # Пауза между тикерами при сборе свечей (секунды). При больших объёмах данных

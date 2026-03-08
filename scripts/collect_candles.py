@@ -101,14 +101,25 @@ async def collect_for_ticker(
             from_dt=from_dt.isoformat(),
         )
     else:
-        # Первый запуск: полная история
-        from_dt = now - timedelta(days=history_days)
-        logger.info(
-            "Full history load",
-            ticker=ticker,
-            days=history_days,
-            from_dt=from_dt.isoformat(),
-        )
+        # Первый запуск: полная история от фиксированной даты или от history_days
+        if data_settings.start_date:
+            from_dt = datetime.fromisoformat(data_settings.start_date).replace(
+                tzinfo=timezone.utc
+            )
+            logger.info(
+                "Full history load",
+                ticker=ticker,
+                start_date=data_settings.start_date,
+                from_dt=from_dt.isoformat(),
+            )
+        else:
+            from_dt = now - timedelta(days=history_days)
+            logger.info(
+                "Full history load",
+                ticker=ticker,
+                days=history_days,
+                from_dt=from_dt.isoformat(),
+            )
 
     if from_dt >= now:
         logger.info("Already up to date", ticker=ticker)
