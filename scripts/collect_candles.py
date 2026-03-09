@@ -18,7 +18,7 @@
 import asyncio
 from datetime import datetime, timedelta, timezone
 
-from grpc import StatusCode
+from grpc import RpcError, StatusCode
 
 from config.settings import data_settings
 from db.candle_repo import (
@@ -196,12 +196,8 @@ async def _collect_with_retry(
             )
             return
         except Exception as e:
-            # Проверяем RESOURCE_EXHAUSTED по коду gRPC
-            is_rate_limit = (
-                hasattr(e, "__iter__") and
-                any(getattr(part, "value", None) == (8, "resource exhausted")
-                    for part in (e if isinstance(e, tuple) else ()))
-            )
+            # Проверяем RESOURCE_EXHAUSTED по типу и коду gRPC-исключения
+            is_rate_limit = isinstance(e, RpcError) and e.code() == StatusCode.RESOURCE_EXHAUSTED
             if is_rate_limit and attempt < max_retries:
                 logger.warning(
                     "Rate limit, повтор через %d сек", retry_delay,

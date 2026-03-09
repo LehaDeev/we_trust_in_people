@@ -20,6 +20,7 @@
 """
 import argparse
 import asyncio
+from pathlib import Path
 
 from config.settings import ml_settings
 from db.database import close_db, init_db
@@ -36,31 +37,41 @@ def _parse_args() -> argparse.Namespace:
         default=False,
         help="Принудительно запустить Optuna HPO (переопределяет ML_FORCE_TUNE из .env)",
     )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help="Папка с CSV-файлами (для Colab без PostgreSQL). Пример: ml/data",
+    )
     return parser.parse_args()
 
 
-async def main(force_tune: bool) -> None:
-    """Инициализировать БД, обучить ансамбль, закрыть соединение."""
+async def main(force_tune: bool, data_dir: Path | None) -> None:
+    """Инициализировать БД (если нет data_dir), обучить ансамбль, закрыть соединение."""
     logger.info(
         "Запуск pipeline обучения ансамбля",
         force_tune=force_tune,
+        data_dir=str(data_dir) if data_dir else "PostgreSQL",
     )
 
-    await init_db()
+    if data_dir is None:
+        await init_db()
 
     try:
-        results = await train_model(force_tune=force_tune)
+        results = await train_model(force_tune=force_tune, data_dir=data_dir)
         logger.info(
             "Обучение завершено",
             trained=list(results.keys()),
             paths={t: str(p) for t, p in results.items()},
         )
     finally:
-        await close_db()
+        if data_dir is None:
+            await close_db()
 
 
 if __name__ == "__main__":
     args = _parse_args()
     # CLI-флаг переопределяет значение из .env
     force_tune = args.force_tune or ml_settings.force_tune
-    asyncio.run(main(force_tune=force_tune))
+    data_dir = Path(args.data_dir) if args.data_dir else None
+    asyncio.run(main(force_tune=force_tune, data_dir=data_dir))

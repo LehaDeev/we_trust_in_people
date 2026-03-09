@@ -68,7 +68,7 @@ class TradingScheduler:
             except Exception as e:
                 logger.error("Критическая ошибка тика", error=str(e), exc_info=True)
 
-            logger.debug("Следующий тик через %d секунд", interval)
+            logger.debug("Следующий тик", interval_seconds=interval)
             await asyncio.sleep(interval)
 
     async def _tick(self) -> None:
@@ -173,7 +173,9 @@ class TradingScheduler:
 
                     # Корректируем SL на размер дивиденда в экс-дивидендный день
                     dividend_adj = dividend_drops.get(figi, Decimal("0"))
-                    effective_sl = trade.stop_loss_price - dividend_adj
+                    effective_sl = max(
+                        trade.stop_loss_price - dividend_adj, Decimal("0.01")
+                    )
                     if dividend_adj > 0:
                         logger.info(
                             "Дивидендная защита SL применена",

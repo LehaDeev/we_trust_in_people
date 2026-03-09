@@ -34,6 +34,9 @@ agents/
 # ML — бинарные веса моделей (слишком большие для GitHub, >100 MB)
 *.pkl
 *.joblib
+
+# ML — экспортированные CSV для обучения в Colab (могут быть 100MB+)
+ml/data/
 *.h5
 *.pt
 *.pth
@@ -47,6 +50,9 @@ logs/
 # DB
 *.sqlite3
 *.db
+
+# CatBoost — артефакты обучения (не нужны в репо)
+catboost_info/
 
 # OS
 .DS_Store

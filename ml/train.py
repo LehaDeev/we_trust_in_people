@@ -15,9 +15,11 @@
 
 Все настройки — в .env (ML_* и DATA_*).
 """
+import gc
 import json
 import pickle
 from pathlib import Path
+from typing import Optional
 
 import lightgbm as lgb
 import numpy as np
@@ -27,7 +29,7 @@ from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from config.settings import data_settings, ml_settings
-from ml.dataset import load_all_tickers_dataset
+from ml.dataset import load_all_tickers_from_csv, load_ticker_data, load_usdrub_data, merge_usdrub
 from ml.features import FEATURE_COLUMNS, compute_features
 from ml.labels import LABEL_NAMES, create_labels
 from ml.tune import tune_extra_trees, tune_lgbm
@@ -322,6 +324,7 @@ def _train_single_ticker(
                 _scaled("et", ExtraTreesClassifier(**et_params)),
             ],
             voting="soft",
+            n_jobs=-1,  # параллельный фит базовых моделей
         )
 
     all_features = X.columns.tolist()
@@ -339,6 +342,8 @@ def _train_single_ticker(
         selected_features = _select_by_threshold(probe, all_features, threshold)
         dropped = len(all_features) - len(selected_features)
         _print_ok(f"{len(selected_features)} из {len(all_features)} признаков (-{dropped})")
+        del probe
+        gc.collect()
         X_final = X[selected_features]
     else:
         # Отбор отключён — берём все признаки
@@ -377,7 +382,10 @@ def _train_single_ticker(
 
 # ── Основная функция обучения ────────────────────────────────────────────────
 
-async def train_model(force_tune: bool = False) -> dict[str, Path]:
+async def train_model(
+    force_tune: bool = False,
+    data_dir: Optional[Path] = None,
+) -> dict[str, Path]:
     """
     Обучить отдельный ансамбль для каждого тикера из DATA_TICKERS.
 
@@ -386,6 +394,8 @@ async def train_model(force_tune: bool = False) -> dict[str, Path]:
 
     Аргументы:
         force_tune: если True — принудительно запустить Optuna для всех моделей.
+        data_dir:   папка с CSV-файлами (для Colab без PostgreSQL).
+                    Если None — данные загружаются из PostgreSQL.
 
     Возвращает:
         Словарь {ticker: Path} для успешно обученных тикеров.
@@ -395,23 +405,54 @@ async def train_model(force_tune: bool = False) -> dict[str, Path]:
     if force_tune:
         logger.info("Режим force_tune: Optuna будет запущена для всех моделей")
 
-    logger.info("Загрузка данных свечей...", tickers=data_settings.tickers)
-    raw = await load_all_tickers_dataset(
-        data_settings.tickers,
-        interval=data_settings.candle_interval,
-    )
-
-    if raw.empty:
-        raise RuntimeError("Нет данных. Запустите scripts/collect_candles.py.")
-
+    tickers_list = data_settings.tickers
+    total = len(tickers_list)
     results: dict[str, Path] = {}
     f1_scores: dict[str, float] = {}
-    tickers_list = list(raw["ticker"].unique())
-    total = len(tickers_list)
 
-    for i, (ticker, group) in enumerate(raw.groupby("ticker", sort=False), 1):
-        ticker = str(ticker)
-        group = group.reset_index(drop=True)
+    if data_dir is not None:
+        # Режим CSV (Colab): загружаем всё сразу — файлы уже на диске
+        logger.info("Режим CSV: загрузка из папки", data_dir=str(data_dir))
+        raw = load_all_tickers_from_csv(
+            data_dir,
+            tickers=tickers_list,
+            interval=data_settings.candle_interval,
+        )
+        if raw.empty:
+            raise RuntimeError("Нет данных в CSV. Запустите scripts/export_candles_csv.py.")
+        ticker_groups = {t: g.reset_index(drop=True) for t, g in raw.groupby("ticker", sort=False)}
+        del raw
+        gc.collect()
+    else:
+        # Режим PostgreSQL: загружаем тикеры по одному чтобы не держать всё в RAM
+        logger.info("Загрузка свечей из PostgreSQL по одному тикеру...")
+        ticker_groups = None  # будем загружать в цикле
+
+    # Загружаем USD/RUB один раз — нужен для merge в режиме PostgreSQL
+    usdrub_df: pd.DataFrame | None = None
+    if data_dir is None:
+        usdrub_df = await load_usdrub_data(data_settings.candle_interval)
+        if usdrub_df.empty:
+            logger.warning("USD/RUB данные не найдены — признак usdrub будет нулевым")
+
+    for i, ticker in enumerate(tickers_list, 1):
+        if ticker_groups is not None:
+            # CSV-режим: группа уже в памяти
+            group = ticker_groups.get(ticker)
+            if group is None:
+                logger.warning("Нет данных для тикера в CSV, пропускаем", ticker=ticker)
+                continue
+        else:
+            # PostgreSQL-режим: загружаем только этот тикер
+            df = await load_ticker_data(ticker, data_settings.candle_interval)
+            if df.empty:
+                logger.warning("Нет данных для тикера в БД, пропускаем", ticker=ticker)
+                continue
+            group = merge_usdrub(df, usdrub_df)
+            group.insert(0, "ticker", ticker)
+            group = group.reset_index(drop=True)
+            del df
+
         _print_ticker_header(ticker, i, total, len(group))
         logger.info("Обучение модели", ticker=ticker)
         try:
@@ -421,6 +462,9 @@ async def train_model(force_tune: bool = False) -> dict[str, Path]:
         except Exception as e:
             logger.error("Ошибка обучения тикера", ticker=ticker, error=str(e))
             print(f"  x Error: {e}", flush=True)
+        finally:
+            del group
+            gc.collect()
 
     failed = [t for t in data_settings.tickers if t not in results]
     _print_summary(results, failed)

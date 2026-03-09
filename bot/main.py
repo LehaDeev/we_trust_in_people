@@ -44,9 +44,24 @@ async def main() -> None:
     dp.include_router(portfolio.router)
     dp.include_router(trading.router)
 
+    def _on_task_done(task: asyncio.Task) -> None:
+        """Логировать неожиданное завершение фоновой задачи."""
+        if task.cancelled():
+            return
+        exc = task.exception()
+        if exc is not None:
+            logger.error(
+                "Фоновая задача завершилась с ошибкой",
+                task=task.get_name(),
+                error=str(exc),
+                exc_info=exc,
+            )
+
     # Запускаем планировщики как фоновые задачи
-    scheduler_task = asyncio.create_task(TradingScheduler().run())
-    retrain_task = asyncio.create_task(RetrainScheduler().run())
+    scheduler_task = asyncio.create_task(TradingScheduler().run(), name="TradingScheduler")
+    retrain_task = asyncio.create_task(RetrainScheduler().run(), name="RetrainScheduler")
+    scheduler_task.add_done_callback(_on_task_done)
+    retrain_task.add_done_callback(_on_task_done)
 
     logger.info("Бот запущен, начинаю polling...")
     try:

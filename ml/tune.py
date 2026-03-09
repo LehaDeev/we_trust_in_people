@@ -127,6 +127,7 @@ def tune_lgbm(
             "min_child_samples": trial.suggest_int("min_child_samples", 10, 50),
             "random_state": ml_settings.random_state,
             "verbose": -1,
+            "n_jobs": -1,  # использовать все ядра CPU при каждом трайле
             # Балансировка классов: HOLD доминирует (60–80%), без этого модель
             # выучивает "всегда HOLD" и F1_macro падает к случайному уровню ~0.33
             "class_weight": "balanced",

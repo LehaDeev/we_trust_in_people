@@ -86,7 +86,16 @@ we_trust_in_people/
 ├── tinkoff/                 # Async gRPC клиент, рыночные данные, портфель, дивиденды
 ├── ml/                      # Feature engineering, обучение, инференс, веса
 ├── trading/                 # Исполнение ордеров, scheduler, P&L, уведомления
-├── bot/                     # Telegram-бот: handlers, keyboards
+├── bot/
+│   ├── handlers/
+│   │   ├── start.py         # Главное меню
+│   │   ├── signals.py       # ML-сигналы
+│   │   ├── portfolio.py     # Портфель
+│   │   ├── trading.py       # Меню торговли + toggle авто/ручной
+│   │   ├── trading_buy.py   # Ручная покупка: выбор тикера → превью → подтверждение
+│   │   ├── trading_sell.py  # Ручная продажа: позиции → P&L → подтверждение
+│   │   └── trading_info.py  # Позиции, история, статистика, параметры
+│   └── keyboards.py         # Inline-клавиатуры (только inline)
 ├── scripts/                 # Точки входа: collect_candles, train_model, run_bot
 ├── utils/                   # logger, redis_cache
 ├── docs/                    # Подробная документация

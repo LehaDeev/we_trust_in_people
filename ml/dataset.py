@@ -11,6 +11,7 @@
     при обучении нужны свежие данные без TTL-ограничений.
 """
 import io
+from pathlib import Path
 
 import pandas as pd
 from sqlalchemy import select
@@ -165,6 +166,65 @@ def merge_usdrub(df: pd.DataFrame, usdrub_df: pd.DataFrame) -> pd.DataFrame:
     merged["usdrub_close"] = merged["usdrub_close"].ffill().fillna(0.0)
     merged = merged.drop(columns=["_t"]).sort_values("time").reset_index(drop=True)
     return merged
+
+
+def load_all_tickers_from_csv(
+    data_dir: Path,
+    tickers: list[str],
+    interval: str = "1h",
+) -> pd.DataFrame:
+    """
+    Загрузить свечи из CSV-файлов вместо PostgreSQL (для обучения в Colab).
+
+    Ожидает файлы: {data_dir}/{TICKER}.csv и {data_dir}/USDRUB.csv,
+    экспортированные скриптом scripts/export_candles_csv.py.
+
+    Аргументы:
+        data_dir: папка с CSV-файлами.
+        tickers:  список тикеров.
+        interval: строка интервала (не используется — определяется из файла).
+
+    Возвращает:
+        Объединённый DataFrame с колонками [ticker, time, open, high, low, close, volume].
+    """
+    data_dir = Path(data_dir)
+
+    # Загружаем USD/RUB
+    usdrub_path = data_dir / "USDRUB.csv"
+    if usdrub_path.exists():
+        usdrub_df = pd.read_csv(usdrub_path, parse_dates=["time"])
+        for col in ("open", "high", "low", "close", "volume"):
+            usdrub_df[col] = usdrub_df[col].astype(float)
+        logger.info("USD/RUB загружен из CSV", rows=len(usdrub_df))
+    else:
+        usdrub_df = pd.DataFrame()
+        logger.warning("USDRUB.csv не найден — признак usdrub будет нулевым")
+
+    frames: list[pd.DataFrame] = []
+    for ticker in tickers:
+        path = data_dir / f"{ticker}.csv"
+        if not path.exists():
+            logger.warning("CSV не найден, тикер пропущен", ticker=ticker, path=str(path))
+            continue
+        df = pd.read_csv(path, parse_dates=["time"])
+        for col in ("open", "high", "low", "close", "volume"):
+            df[col] = df[col].astype(float)
+        df = merge_usdrub(df, usdrub_df)
+        df.insert(0, "ticker", ticker)
+        frames.append(df)
+        logger.info("Ticker data loaded from CSV", ticker=ticker, rows=len(df))
+
+    if not frames:
+        logger.error("Нет данных ни по одному тикеру")
+        return pd.DataFrame()
+
+    combined = pd.concat(frames, ignore_index=True)
+    logger.info(
+        "All tickers loaded from CSV",
+        tickers=len(frames),
+        total_rows=len(combined),
+    )
+    return combined
 
 
 async def load_all_tickers_dataset(

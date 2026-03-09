@@ -230,7 +230,7 @@ async def fetch_multiple_instruments_prices(
         Словарь {instrument_id: цена}
     """
     all_prices: dict[str, Decimal] = {}
-    semaphore = asyncio.Semaphore(3)
+    semaphore = asyncio.Semaphore(max_concurrent)
 
     async def fetch_batch(batch: list[str]) -> dict[str, Decimal]:
         async with semaphore:

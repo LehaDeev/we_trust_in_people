@@ -7,11 +7,15 @@ Runtime-состояние режима торговли.
 Авто-режим: TradingScheduler торгует по ML-сигналам автоматически.
 Ручной режим: Scheduler приостановлен, пользователь торгует кнопками в боте.
 """
+import threading
+
 from config.settings import trading_settings
 from utils.logger import logger
 
 # Текущий режим (инициализируется из .env)
 _auto: bool = trading_settings.enabled
+# Защита от одновременного изменения из нескольких корутин / потоков
+_lock = threading.Lock()
 
 
 def is_auto() -> bool:
@@ -27,7 +31,8 @@ def set_auto(value: bool) -> None:
         value: True = авто, False = ручной.
     """
     global _auto
-    _auto = value
+    with _lock:
+        _auto = value
     mode = "авто" if value else "ручной"
     logger.info("Режим торговли изменён", mode=mode)
 
@@ -40,7 +45,9 @@ def toggle() -> bool:
         Новое значение (True = авто, False = ручной).
     """
     global _auto
-    _auto = not _auto
-    mode = "авто" if _auto else "ручной"
+    with _lock:
+        _auto = not _auto
+        new_value = _auto
+    mode = "авто" if new_value else "ручной"
     logger.info("Режим торговли переключён", mode=mode)
-    return _auto
+    return new_value

@@ -7,6 +7,8 @@
 """
 from urllib.parse import quote_plus
 
+from typing import Optional
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -19,6 +21,8 @@ class TinkoffSettings(BaseSettings):
     sandbox: bool = Field(True, alias="TINKOFF_SANDBOX")
     # Лимит PostOrder (заявок в секунду). Актуально: 15/сек с февраля 2025.
     post_order_rate: int = Field(15, alias="TINKOFF_POST_ORDER_RATE")
+    # Таймаут gRPC-соединения в миллисекундах (keepalive timeout)
+    grpc_keepalive_timeout_ms: int = Field(20000, alias="TINKOFF_GRPC_KEEPALIVE_TIMEOUT_MS")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -85,7 +89,7 @@ class DataSettings(BaseSettings):
     # Фиксированная дата начала истории (формат YYYY-MM-DD).
     # Если задана — новые тикеры загружают данные именно с этой даты,
     # игнорируя DATA_HISTORY_DAYS. Пустая строка = не используется.
-    start_date: str = Field("", alias="DATA_START_DATE")
+    start_date: Optional[str] = Field(None, alias="DATA_START_DATE")
     # FIGI инструмента USD/RUB (USDRUB_TOM на MOEX) — используется как ML-признак
     usdrub_figi: str = Field("BBG0013HGFT4", alias="DATA_USDRUB_FIGI")
     # Пауза между тикерами при сборе свечей (секунды). При больших объёмах данных
@@ -123,9 +127,9 @@ class MLSettings(BaseSettings):
     random_state: int = Field(42, alias="ML_RANDOM_STATE")
 
     # Количество итераций Optuna для каждой модели
-    optuna_trials_lgbm: int = Field(50, alias="ML_OPTUNA_TRIALS_LGBM")
-    optuna_trials_xgb: int = Field(50, alias="ML_OPTUNA_TRIALS_XGB")
-    optuna_trials_et: int = Field(30, alias="ML_OPTUNA_TRIALS_ET")
+    optuna_trials_lgbm: int = Field(25, alias="ML_OPTUNA_TRIALS_LGBM")
+    optuna_trials_xgb: int = Field(25, alias="ML_OPTUNA_TRIALS_XGB")
+    optuna_trials_et: int = Field(15, alias="ML_OPTUNA_TRIALS_ET")
     # SVC медленнее деревьев из-за Platt scaling — держать <= 20 трайлов
     optuna_trials_svc: int = Field(20, alias="ML_OPTUNA_TRIALS_SVC")
     optuna_trials_catboost: int = Field(30, alias="ML_OPTUNA_TRIALS_CATBOOST")

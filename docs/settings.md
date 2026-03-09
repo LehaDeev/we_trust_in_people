@@ -10,6 +10,7 @@
 | `TINKOFF_ACCOUNT_ID` | ID счёта | — |
 | `TINKOFF_SANDBOX` | Режим песочницы | `false` |
 | `TINKOFF_POST_ORDER_RATE` | Лимит PostOrder (заявок/сек) | `15` |
+| `TINKOFF_GRPC_KEEPALIVE_TIMEOUT_MS` | Таймаут gRPC keepalive (мс) | `20000` |
 
 ## Сбор данных
 
@@ -18,6 +19,9 @@
 | `DATA_TICKERS` | Тикеры через запятую | `SBER,GAZP,...` |
 | `DATA_CANDLE_INTERVAL` | Интервал свечей (`1h`, `1d`, `15min`) | `1h` |
 | `DATA_HISTORY_DAYS` | Глубина истории при первом запуске | `365` |
+| `DATA_START_DATE` | Фиксированная дата начала истории (`YYYY-MM-DD`); если задана — игнорирует `DATA_HISTORY_DAYS` | — |
+| `DATA_USDRUB_FIGI` | FIGI инструмента USD/RUB | `BBG0013HGFT4` |
+| `DATA_COLLECT_PAUSE_SECONDS` | Пауза между тикерами при сборе (сек) | `15` |
 
 ## ML
 

@@ -29,7 +29,10 @@ async def get_client() -> AsyncGenerator[AsyncServices, None]:
         async with get_client() as client:
             candles = await client.market_data.get_candles(...)
     """
-    async with AsyncClient(token=tinkoff_settings.token) as client:
+    grpc_options = [
+        ("grpc.keepalive_timeout_ms", tinkoff_settings.grpc_keepalive_timeout_ms),
+    ]
+    async with AsyncClient(token=tinkoff_settings.token, options=grpc_options) as client:
         logger.debug("Tinkoff gRPC client connected")
         try:
             yield client
