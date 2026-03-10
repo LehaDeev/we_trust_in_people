@@ -235,6 +235,34 @@ class TradingScheduler:
                                         error=str(re_e),
                                     )
 
+                        # Если SL ордер не был выставлен при открытии (сбой API) — выставляем сейчас
+                        if close_reason is None and not trade.sl_stop_order_id:
+                            if current_price <= trade.stop_loss_price:
+                                close_reason = "STOP_LOSS"
+                            else:
+                                try:
+                                    price_step = await get_min_price_increment(figi)
+                                    sl_rounded = round_sl_to_step(trade.stop_loss_price, price_step)
+                                    new_sl_id = await post_stop_order(
+                                        instrument_id=figi,
+                                        quantity=trade.lots,
+                                        stop_price=sl_rounded,
+                                        direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                                    )
+                                    trade.sl_stop_order_id = new_sl_id
+                                    await trade_repo.update_trade(session, trade)
+                                    logger.info(
+                                        "SL стоп-ордер выставлен (не был создан при открытии)",
+                                        ticker=asset.ticker,
+                                        stop_order_id=new_sl_id,
+                                    )
+                                except Exception as re_e:
+                                    logger.error(
+                                        "Не удалось выставить SL стоп-ордер",
+                                        ticker=asset.ticker,
+                                        error=str(re_e),
+                                    )
+
                         # Проверяем исполнение стоп-ордера SL (пропал из активных → исполнился)
                         if close_reason is None and trade.sl_stop_order_id and stop_orders_fetched and trade.sl_stop_order_id not in active_stop_ids:
                             # Дополнительная проверка: если цена выше SL — ордер был
