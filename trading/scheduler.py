@@ -32,13 +32,13 @@ from ml.predict import predict_all
 from tinkoff.dividend_gap_stats import get_gap_protection_days_bulk
 from tinkoff.dividends import get_dividend_drops_bulk
 from tinkoff.instruments import get_instrument_by_ticker
-from tinkoff.market_data import get_last_prices
-from tinkoff.portfolio import get_order_state, get_rub_balance, get_stop_order_ids
-from t_tech.invest.schemas import OrderExecutionReportStatus
+from tinkoff.market_data import get_last_prices, get_min_price_increment
+from tinkoff.portfolio import get_order_state, get_rub_balance, get_stop_order_ids, post_limit_order, post_stop_order
+from t_tech.invest.schemas import OrderDirection, OrderExecutionReportStatus, StopOrderDirection
 from trading import state
 from trading.executor import TradeExecutor
 from trading.notifier import notify_close, notify_insufficient_balance, notify_open
-from trading.profitability import calculate_pnl
+from trading.profitability import calculate_pnl, round_sl_to_step, round_tp_to_step
 from utils.logger import logger
 
 
@@ -191,6 +191,36 @@ class TradingScheduler:
                             tp_status = await get_order_state(trade.tp_order_id)
                             if tp_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL:
                                 close_reason = "TAKE_PROFIT"
+                            elif tp_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_CANCELLED:
+                                # TP ордер истёк (конец торговой сессии) — перевыставляем
+                                logger.warning(
+                                    "TP ордер истёк, перевыставляем",
+                                    ticker=asset.ticker,
+                                    order_id=trade.tp_order_id,
+                                )
+                                try:
+                                    price_step = await get_min_price_increment(figi)
+                                    tp_rounded = round_tp_to_step(trade.take_profit_price, price_step)
+                                    tp_resp = await post_limit_order(
+                                        instrument_id=figi,
+                                        quantity=trade.lots,
+                                        price=tp_rounded,
+                                        direction=OrderDirection.ORDER_DIRECTION_SELL,
+                                    )
+                                    trade.tp_order_id = tp_resp.order_id
+                                    await trade_repo.update_trade(session, trade)
+                                    logger.info(
+                                        "TP ордер перевыставлен",
+                                        ticker=asset.ticker,
+                                        order_id=tp_resp.order_id,
+                                        price=str(tp_rounded),
+                                    )
+                                except Exception as re_e:
+                                    logger.error(
+                                        "Не удалось перевыставить TP ордер",
+                                        ticker=asset.ticker,
+                                        error=str(re_e),
+                                    )
                         except Exception as e:
                             logger.warning("Не удалось получить статус TP ордера",
                                            order_id=trade.tp_order_id, error=str(e))
@@ -203,14 +233,36 @@ class TradingScheduler:
                                 if current_price <= trade.stop_loss_price:
                                     close_reason = "STOP_LOSS"
                                 else:
+                                    # SL ордер исчез (истёк или отменён биржей) — перевыставляем
                                     logger.warning(
-                                        "SL стоп-ордер исчез, но цена выше SL — вероятно отменён биржей, "
-                                        "переоткрываем стоп-ордер",
+                                        "SL стоп-ордер исчез, но цена выше SL — перевыставляем",
                                         ticker=asset.ticker,
                                         current_price=str(current_price),
                                         stop_loss_price=str(trade.stop_loss_price),
                                         sl_stop_order_id=trade.sl_stop_order_id,
                                     )
+                                    try:
+                                        price_step = await get_min_price_increment(figi)
+                                        sl_rounded = round_sl_to_step(trade.stop_loss_price, price_step)
+                                        new_sl_id = await post_stop_order(
+                                            instrument_id=figi,
+                                            quantity=trade.lots,
+                                            stop_price=sl_rounded,
+                                            direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                                        )
+                                        trade.sl_stop_order_id = new_sl_id
+                                        await trade_repo.update_trade(session, trade)
+                                        logger.info(
+                                            "SL стоп-ордер перевыставлен",
+                                            ticker=asset.ticker,
+                                            stop_order_id=new_sl_id,
+                                        )
+                                    except Exception as re_e:
+                                        logger.error(
+                                            "Не удалось перевыставить SL стоп-ордер",
+                                            ticker=asset.ticker,
+                                            error=str(re_e),
+                                        )
                     else:
                         # Фолбэк: нет биржевых ордеров — сравниваем цену (старая логика)
                         dividend_adj = dividend_drops.get(figi, Decimal("0"))
