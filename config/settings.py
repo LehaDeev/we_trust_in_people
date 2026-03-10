@@ -256,6 +256,10 @@ class TradingSettings(BaseSettings):
     # Интервал быстрого polling SL стоп-ордеров в OrderWatcher (секунды).
     # Чем меньше — тем быстрее обнаруживается срабатывание SL, но больше API-запросов.
     order_poll_seconds: int = Field(30, alias="TRADING_ORDER_POLL_SECONDS")
+    # Пауза между тикерами при внутрисессионном инкрементальном сборе свечей (секунды).
+    # Для ночного переобучения используется DATA_COLLECT_PAUSE_SECONDS (дольше, но безопаснее).
+    # Здесь загружается 1–2 свечи на тикер — короткая пауза не вызывает RESOURCE_EXHAUSTED.
+    candle_update_pause_seconds: int = Field(3, alias="TRADING_CANDLE_UPDATE_PAUSE_SECONDS")
 
     @property
     def dividend_override(self) -> dict[str, int]:

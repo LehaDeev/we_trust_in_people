@@ -219,12 +219,20 @@ async def _collect_with_retry(
                 return
 
 
-async def run_collection(full_reload: bool = False) -> None:
+async def run_collection(
+    full_reload: bool = False,
+    pause_seconds: int | None = None,
+) -> None:
     """
     Собрать новые свечи по всем тикерам из настроек.
 
     В отличие от main() — не управляет жизненным циклом БД (init_db / close_db).
     Предназначена для вызова внутри уже запущенного процесса (бот, планировщик).
+
+    Аргументы:
+        full_reload:   загрузить полную историю вместо инкрементального обновления.
+        pause_seconds: пауза между тикерами (сек). None = из DATA_COLLECT_PAUSE_SECONDS.
+                       Для внутрисессионного обновления передавать малое значение (2–5 сек).
     """
     tickers = data_settings.tickers
     candle_interval = _get_candle_interval(data_settings.candle_interval)
@@ -246,7 +254,7 @@ async def run_collection(full_reload: bool = False) -> None:
     if missing:
         logger.warning("Тикеры не найдены в API", missing=missing)
 
-    pause = data_settings.collect_pause_seconds
+    pause = pause_seconds if pause_seconds is not None else data_settings.collect_pause_seconds
     tickers_list = list(instruments.items())
 
     for i, (ticker, info) in enumerate(tickers_list):

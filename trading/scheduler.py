@@ -26,7 +26,7 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from config.settings import trading_settings
+from config.settings import data_settings, ml_settings, trading_settings
 from db.database import get_session
 from db.models import Asset, Trade
 from db import trade_repo
@@ -37,11 +37,13 @@ from tinkoff.instruments import get_instrument_by_ticker
 from tinkoff.market_data import get_last_prices, get_min_price_increment
 from tinkoff.portfolio import get_active_order_ids, get_order_state, get_rub_balance, get_stop_order_ids, post_limit_order, post_stop_order
 from t_tech.invest.schemas import OrderDirection, OrderExecutionReportStatus, StopOrderDirection
+from scripts.collect_candles import run_collection
 from trading import state
 from trading.executor import TradeExecutor
 from trading.notifier import notify_close, notify_insufficient_balance, notify_open
 from trading.profitability import calculate_pnl, round_sl_to_step, round_tp_to_step
 from utils.logger import logger
+from utils.redis_cache import get_redis
 
 
 class TradingScheduler:
@@ -372,7 +374,10 @@ class TradingScheduler:
             else:
                 prices = {}
 
-            # ── 6. ML-сигналы ─────────────────────────────────────────────────
+            # ── 6. Обновляем свечи из Tinkoff API перед инференсом ───────────
+            await _update_candles()
+
+            # ── 7. ML-сигналы ─────────────────────────────────────────────────
             signals = await predict_all()
             logger.info("Сигналы получены", count=len(signals))
 
@@ -563,6 +568,36 @@ def _is_moex_session_open() -> bool:
     main_open = time(10, 0) <= now_msk < time(18, 50)
     evening_open = time(19, 0) <= now_msk < time(23, 50)
     return main_open or evening_open
+
+
+async def _update_candles() -> None:
+    """
+    Инкрементально обновить свечи из Tinkoff API и сбросить Redis-кеш.
+
+    Вызывается перед каждым ML-инференсом, чтобы модель работала
+    на актуальных данных, а не только на ночном снимке.
+    При ошибке — логирует и продолжает тик без обновления.
+    """
+    try:
+        await run_collection(pause_seconds=trading_settings.candle_update_pause_seconds)
+    except Exception as e:
+        logger.warning("Не удалось обновить свечи перед инференсом", error=str(e))
+        return
+
+    # Инвалидируем Redis-кеш свечей и сигналов — следующий predict_signal()
+    # прочитает обновлённые данные из БД вместо устаревшего кеша.
+    try:
+        redis = await get_redis()
+        if redis is not None:
+            interval = data_settings.candle_interval
+            version = ml_settings.model_version
+            for ticker in data_settings.tickers + ["USDRUB"]:
+                await redis.delete(f"candles:{ticker}:{interval}")
+            for ticker in data_settings.tickers:
+                await redis.delete(f"signal:{ticker}:{version}")
+            logger.debug("Redis-кеш свечей и сигналов инвалидирован")
+    except Exception as e:
+        logger.warning("Ошибка инвалидации Redis-кеша после обновления свечей", error=str(e))
 
 
 async def _get_lot_size(ticker: str) -> int:

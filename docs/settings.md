@@ -80,6 +80,7 @@
 | `TRADING_DIVIDEND_OVERRIDE` | Ручные окна защиты по тикерам (`SBER:45,GAZP:90`) | — |
 | `TRADING_VOLUME_MIN_RATIO` | Мин. `volume_ratio` для подтверждения BUY (`1.0` = отключён) | `1.0` |
 | `TRADING_ORDER_POLL_SECONDS` | Интервал polling SL стоп-ордеров в OrderWatcher (сек) | `30` |
+| `TRADING_CANDLE_UPDATE_PAUSE_SECONDS` | Пауза между тикерами при внутрисессионном обновлении свечей (сек) | `3` |
 
 ## Приложение
 
