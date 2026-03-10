@@ -33,7 +33,7 @@ from tinkoff.dividend_gap_stats import get_gap_protection_days_bulk
 from tinkoff.dividends import get_dividend_drops_bulk
 from tinkoff.instruments import get_instrument_by_ticker
 from tinkoff.market_data import get_last_prices, get_min_price_increment
-from tinkoff.portfolio import get_order_state, get_rub_balance, get_stop_order_ids, post_limit_order, post_stop_order
+from tinkoff.portfolio import get_active_order_ids, get_order_state, get_rub_balance, get_stop_order_ids, post_limit_order, post_stop_order
 from t_tech.invest.schemas import OrderDirection, OrderExecutionReportStatus, StopOrderDirection
 from trading import state
 from trading.executor import TradeExecutor
@@ -161,14 +161,21 @@ class TradingScheduler:
 
                 # ── 5. Проверяем SL/TP (всегда, независимо от рентабельности) ─
 
-                # Получаем ID активных стоп-ордеров один раз для всех позиций
+                # Получаем ID активных ордеров один раз для всех позиций
                 active_stop_ids: set[str] = set()
+                active_order_ids: set[str] = set()
                 stop_orders_fetched: bool = False
+                limit_orders_fetched: bool = False
                 try:
                     active_stop_ids = await get_stop_order_ids()
                     stop_orders_fetched = True
                 except Exception as e:
                     logger.warning("Не удалось получить список стоп-ордеров", error=str(e))
+                try:
+                    active_order_ids = await get_active_order_ids()
+                    limit_orders_fetched = True
+                except Exception as e:
+                    logger.warning("Не удалось получить список лимитных ордеров", error=str(e))
 
                 for trade in open_trades:
                     figi = asset_id_to_figi.get(trade.asset_id)
@@ -186,15 +193,21 @@ class TradingScheduler:
 
                     # Приоритет: проверка биржевых ордеров (если были выставлены)
                     if trade.tp_order_id:
-                        # Проверяем исполнение лимитного TP-ордера
-                        try:
-                            tp_status = await get_order_state(trade.tp_order_id)
-                            if tp_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL:
-                                close_reason = "TAKE_PROFIT"
-                            elif tp_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_CANCELLED:
-                                # TP ордер истёк (конец торговой сессии) — перевыставляем
+                        # Если список активных ордеров получен и TP в нём отсутствует —
+                        # ордер либо исполнился, либо истёк (конец сессии)
+                        tp_gone = limit_orders_fetched and trade.tp_order_id not in active_order_ids
+                        if tp_gone:
+                            try:
+                                tp_status = await get_order_state(trade.tp_order_id)
+                                if tp_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL:
+                                    close_reason = "TAKE_PROFIT"
+                            except Exception:
+                                pass  # ордер заархивирован — считаем истёкшим
+
+                            # Не FILL (истёк или заархивирован) — перевыставляем TP
+                            if close_reason != "TAKE_PROFIT":
                                 logger.warning(
-                                    "TP ордер истёк, перевыставляем",
+                                    "TP ордер исчез (истёк или отменён), перевыставляем",
                                     ticker=asset.ticker,
                                     order_id=trade.tp_order_id,
                                 )
@@ -221,48 +234,44 @@ class TradingScheduler:
                                         ticker=asset.ticker,
                                         error=str(re_e),
                                     )
-                        except Exception as e:
-                            logger.warning("Не удалось получить статус TP ордера",
-                                           order_id=trade.tp_order_id, error=str(e))
 
                         # Проверяем исполнение стоп-ордера SL (пропал из активных → исполнился)
-                        if close_reason is None and trade.sl_stop_order_id and stop_orders_fetched:
-                            if trade.sl_stop_order_id not in active_stop_ids:
-                                # Дополнительная проверка: если цена выше SL — ордер был
-                                # отменён биржей (не исполнился), а не сработал
-                                if current_price <= trade.stop_loss_price:
-                                    close_reason = "STOP_LOSS"
-                                else:
-                                    # SL ордер исчез (истёк или отменён биржей) — перевыставляем
-                                    logger.warning(
-                                        "SL стоп-ордер исчез, но цена выше SL — перевыставляем",
-                                        ticker=asset.ticker,
-                                        current_price=str(current_price),
-                                        stop_loss_price=str(trade.stop_loss_price),
-                                        sl_stop_order_id=trade.sl_stop_order_id,
+                        if close_reason is None and trade.sl_stop_order_id and stop_orders_fetched and trade.sl_stop_order_id not in active_stop_ids:
+                            # Дополнительная проверка: если цена выше SL — ордер был
+                            # отменён биржей (не исполнился), а не сработал
+                            if current_price <= trade.stop_loss_price:
+                                close_reason = "STOP_LOSS"
+                            else:
+                                # SL ордер исчез (истёк или отменён биржей) — перевыставляем
+                                logger.warning(
+                                    "SL стоп-ордер исчез, но цена выше SL — перевыставляем",
+                                    ticker=asset.ticker,
+                                    current_price=str(current_price),
+                                    stop_loss_price=str(trade.stop_loss_price),
+                                    sl_stop_order_id=trade.sl_stop_order_id,
+                                )
+                                try:
+                                    price_step = await get_min_price_increment(figi)
+                                    sl_rounded = round_sl_to_step(trade.stop_loss_price, price_step)
+                                    new_sl_id = await post_stop_order(
+                                        instrument_id=figi,
+                                        quantity=trade.lots,
+                                        stop_price=sl_rounded,
+                                        direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
                                     )
-                                    try:
-                                        price_step = await get_min_price_increment(figi)
-                                        sl_rounded = round_sl_to_step(trade.stop_loss_price, price_step)
-                                        new_sl_id = await post_stop_order(
-                                            instrument_id=figi,
-                                            quantity=trade.lots,
-                                            stop_price=sl_rounded,
-                                            direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
-                                        )
-                                        trade.sl_stop_order_id = new_sl_id
-                                        await trade_repo.update_trade(session, trade)
-                                        logger.info(
-                                            "SL стоп-ордер перевыставлен",
-                                            ticker=asset.ticker,
-                                            stop_order_id=new_sl_id,
-                                        )
-                                    except Exception as re_e:
-                                        logger.error(
-                                            "Не удалось перевыставить SL стоп-ордер",
-                                            ticker=asset.ticker,
-                                            error=str(re_e),
-                                        )
+                                    trade.sl_stop_order_id = new_sl_id
+                                    await trade_repo.update_trade(session, trade)
+                                    logger.info(
+                                        "SL стоп-ордер перевыставлен",
+                                        ticker=asset.ticker,
+                                        stop_order_id=new_sl_id,
+                                    )
+                                except Exception as re_e:
+                                    logger.error(
+                                        "Не удалось перевыставить SL стоп-ордер",
+                                        ticker=asset.ticker,
+                                        error=str(re_e),
+                                    )
                     else:
                         # Фолбэк: нет биржевых ордеров — сравниваем цену (старая логика)
                         dividend_adj = dividend_drops.get(figi, Decimal("0"))

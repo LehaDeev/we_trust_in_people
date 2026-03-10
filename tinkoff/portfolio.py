@@ -389,6 +389,20 @@ async def get_order_state(order_id: str) -> OrderExecutionReportStatus:
     return state.execution_report_status
 
 
+async def get_active_order_ids() -> set[str]:
+    """
+    Получить множество ID активных лимитных заявок по счёту.
+
+    Возвращает:
+        Множество order_id активных (неисполненных/неотменённых) заявок.
+    """
+    async with get_client() as client:
+        response = await client.orders.get_orders(account_id=ACCOUNT_ID)
+    ids = {o.order_id for o in response.orders}
+    logger.debug("Активные лимитные ордера получены", count=len(ids))
+    return ids
+
+
 async def get_open_orders() -> list[dict]:
     """
     Получить все активные (незакрытые) заявки по счёту.
