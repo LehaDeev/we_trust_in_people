@@ -289,7 +289,9 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     if "usdrub_close" in df.columns:
         usdrub = df["usdrub_close"].values.astype(np.float64)
         usdrub_sma20 = talib.SMA(usdrub, timeperiod=20)
-        df["usdrub_ratio"] = np.where(usdrub_sma20 > 0, usdrub / usdrub_sma20, 1.0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            ratio = usdrub / usdrub_sma20
+        df["usdrub_ratio"] = np.where(usdrub_sma20 > 0, ratio, 1.0)
         df["usdrub_change_1h"] = pd.Series(usdrub).pct_change(1).fillna(0.0).values
     else:
         df["usdrub_ratio"] = 0.0

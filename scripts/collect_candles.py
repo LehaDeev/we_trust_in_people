@@ -2,7 +2,8 @@
 Скрипт сбора исторических свечей из Tinkoff API и сохранения в PostgreSQL.
 
 Запуск:
-    python -m scripts.collect_candles
+    python -m scripts.collect_candles                  # инкрементальное обновление
+    python -m scripts.collect_candles --full-reload    # перезагрузка с DATA_START_DATE / DATA_HISTORY_DAYS
 
 Что делает:
     1. Ищет инструменты по списку тикеров из .env (DATA_TICKERS)
@@ -14,7 +15,9 @@
     DATA_TICKERS         — список тикеров через запятую
     DATA_CANDLE_INTERVAL — интервал свечей (1h, 1d и т.д.)
     DATA_HISTORY_DAYS    — глубина истории при первом запуске
+    DATA_START_DATE      — фиксированная дата начала (YYYY-MM-DD), используется при --full-reload
 """
+import argparse
 import asyncio
 from datetime import datetime, timedelta, timezone
 
@@ -68,12 +71,14 @@ async def collect_for_ticker(
     candle_interval: CandleInterval,
     interval_str: str,
     history_days: int,
+    full_reload: bool = False,
 ) -> None:
     """
     Собрать и сохранить свечи для одного инструмента.
 
     Если свечи уже есть в БД — загружает только новые (инкрементально).
-    Если свечей нет — загружает полную историю за history_days дней.
+    Если свечей нет или full_reload=True — загружает полную историю
+    от DATA_START_DATE (или за history_days дней если дата не задана).
     """
     async with get_session() as session:
         asset = await get_or_create_asset(
@@ -92,7 +97,7 @@ async def collect_for_ticker(
 
     # Определяем период загрузки
     now = datetime.now(timezone.utc)
-    if last_time is not None:
+    if last_time is not None and not full_reload:
         # Инкрементальное обновление: от последней свечи + 1 секунда
         from_dt = last_time + timedelta(seconds=1)
         logger.info(
@@ -101,7 +106,7 @@ async def collect_for_ticker(
             from_dt=from_dt.isoformat(),
         )
     else:
-        # Первый запуск: полная история от фиксированной даты или от history_days
+        # Полная история: от фиксированной даты или от history_days
         if data_settings.start_date:
             from_dt = datetime.fromisoformat(data_settings.start_date).replace(
                 tzinfo=timezone.utc
@@ -172,6 +177,7 @@ async def _collect_with_retry(
     candle_interval,
     interval_str: str,
     history_days: int,
+    full_reload: bool = False,
     warn_on_error: bool = False,
     max_retries: int = 3,
     retry_delay: int = 60,
@@ -193,6 +199,7 @@ async def _collect_with_retry(
                 candle_interval=candle_interval,
                 interval_str=interval_str,
                 history_days=history_days,
+                full_reload=full_reload,
             )
             return
         except Exception as e:
@@ -212,7 +219,7 @@ async def _collect_with_retry(
                 return
 
 
-async def run_collection() -> None:
+async def run_collection(full_reload: bool = False) -> None:
     """
     Собрать новые свечи по всем тикерам из настроек.
 
@@ -228,6 +235,7 @@ async def run_collection() -> None:
         "Инкрементальный сбор свечей",
         tickers=tickers,
         interval=interval_str,
+        full_reload=full_reload,
     )
 
     instruments = await get_instruments_by_tickers(tickers)
@@ -251,6 +259,7 @@ async def run_collection() -> None:
             candle_interval=candle_interval,
             interval_str=interval_str,
             history_days=history_days,
+            full_reload=full_reload,
         )
         # Пауза между тикерами кроме последнего — защита от RESOURCE_EXHAUSTED
         if i < len(tickers_list) - 1:
@@ -269,23 +278,33 @@ async def run_collection() -> None:
         candle_interval=candle_interval,
         interval_str=interval_str,
         history_days=history_days,
+        full_reload=full_reload,
         warn_on_error=True,
     )
 
 
 async def main() -> None:
     """Запустить сбор данных по всем тикерам из настроек."""
+    parser = argparse.ArgumentParser(description="Сбор свечей из Tinkoff API")
+    parser.add_argument(
+        "--full-reload",
+        action="store_true",
+        help="Загрузить историю с DATA_START_DATE (или DATA_HISTORY_DAYS) игнорируя уже сохранённые данные",
+    )
+    args = parser.parse_args()
+
     logger.info(
         "Starting candle collection",
         tickers=data_settings.tickers,
         interval=data_settings.candle_interval,
         history_days=data_settings.history_days,
+        full_reload=args.full_reload,
     )
 
     await init_db()
 
     try:
-        await run_collection()
+        await run_collection(full_reload=args.full_reload)
     finally:
         await close_db()
 

@@ -42,6 +42,7 @@ services:
       # Переопределяем хосты: внутри Docker сервисы доступны по имени контейнера,
       # а не localhost. Значения из .env (localhost) здесь не подходят.
       POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
       REDIS_HOST: redis
     volumes:
       # Веса моделей хранятся на хосте — не теряются при пересборке образа.
