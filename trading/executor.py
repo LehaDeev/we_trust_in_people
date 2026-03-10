@@ -9,13 +9,19 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from t_tech.invest.schemas import OrderDirection
+from t_tech.invest.schemas import OrderDirection, StopOrderDirection
 from t_tech.invest.utils import quotation_to_decimal
 
 from config.settings import trading_settings
 from db.models import Asset, Trade
 from db import trade_repo
-from tinkoff.portfolio import post_market_order
+from tinkoff.portfolio import (
+    cancel_order,
+    cancel_stop_order,
+    post_limit_order,
+    post_market_order,
+    post_stop_order,
+)
 from trading.profitability import adjusted_sl_price, adjusted_tp_price, calculate_pnl
 from utils.logger import logger
 
@@ -96,6 +102,35 @@ class TradeExecutor:
         )
         trade = await trade_repo.save_trade(session, trade)
 
+        # Выставляем биржевые ордера TP и SL сразу после покупки
+        tp_order_id: str | None = None
+        sl_stop_order_id: str | None = None
+
+        try:
+            tp_order_id = (await post_limit_order(
+                instrument_id=instrument_uid,
+                quantity=lots,
+                price=take_profit_price,
+                direction=OrderDirection.ORDER_DIRECTION_SELL,
+            )).order_id
+        except Exception as e:
+            logger.warning("Не удалось выставить лимитный ордер TP", ticker=asset.ticker, error=str(e))
+
+        try:
+            sl_stop_order_id = await post_stop_order(
+                instrument_id=instrument_uid,
+                quantity=lots,
+                stop_price=stop_loss_price,
+                direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+            )
+        except Exception as e:
+            logger.warning("Не удалось выставить стоп-ордер SL", ticker=asset.ticker, error=str(e))
+
+        if tp_order_id or sl_stop_order_id:
+            trade.tp_order_id = tp_order_id
+            trade.sl_stop_order_id = sl_stop_order_id
+            trade = await trade_repo.update_trade(session, trade)
+
         logger.info(
             "Позиция открыта",
             ticker=asset.ticker,
@@ -104,6 +139,8 @@ class TradeExecutor:
             lot_size=lot_size,
             stop_loss=str(stop_loss_price),
             take_profit=str(take_profit_price),
+            tp_order_id=tp_order_id,
+            sl_stop_order_id=sl_stop_order_id,
         )
         return trade
 
@@ -142,25 +179,46 @@ class TradeExecutor:
         )
 
         exit_price = current_price
-        try:
-            response = await post_market_order(
-                instrument_id=instrument_uid,
-                quantity=trade.lots,
-                direction=OrderDirection.ORDER_DIRECTION_SELL,
-            )
-            if response.executed_order_price:
+
+        # Если позиция закрывается по сигналу (не по биржевому ордеру) —
+        # отменяем ранее выставленные биржевые TP/SL ордера во избежание дублирования
+        if reason not in ("TAKE_PROFIT", "STOP_LOSS") or not trade.tp_order_id:
+            if trade.tp_order_id:
                 try:
-                    exit_price = quotation_to_decimal(response.executed_order_price)
-                except Exception:
-                    pass
-        except Exception as e:
-            logger.error(
-                "Ошибка выставления ордера SELL",
-                ticker=asset.ticker,
-                trade_id=trade.id,
-                error=str(e),
-            )
-            exit_price = current_price
+                    await cancel_order(trade.tp_order_id)
+                except Exception as e:
+                    logger.warning("Не удалось отменить TP ордер", order_id=trade.tp_order_id, error=str(e))
+            if trade.sl_stop_order_id:
+                try:
+                    await cancel_stop_order(trade.sl_stop_order_id)
+                except Exception as e:
+                    logger.warning("Не удалось отменить SL стоп-ордер", stop_order_id=trade.sl_stop_order_id, error=str(e))
+
+        # Если TP/SL сработал на бирже — позиция уже закрыта биржей,
+        # рыночный ордер выставлять не нужно
+        if reason in ("TAKE_PROFIT", "STOP_LOSS") and trade.tp_order_id:
+            # Позиция закрыта биржей, используем текущую цену как цену выхода
+            pass
+        else:
+            try:
+                response = await post_market_order(
+                    instrument_id=instrument_uid,
+                    quantity=trade.lots,
+                    direction=OrderDirection.ORDER_DIRECTION_SELL,
+                )
+                if response.executed_order_price:
+                    try:
+                        exit_price = quotation_to_decimal(response.executed_order_price)
+                    except Exception:
+                        pass
+            except Exception as e:
+                logger.error(
+                    "Ошибка выставления ордера SELL",
+                    ticker=asset.ticker,
+                    trade_id=trade.id,
+                    error=str(e),
+                )
+                exit_price = current_price
 
         # Чистый PnL: учитываем комиссии и НДФЛ
         lot_size = getattr(trade, "lot_size", 1) or 1

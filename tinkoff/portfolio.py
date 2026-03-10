@@ -15,11 +15,15 @@ from decimal import Decimal
 
 from t_tech.invest.schemas import (
     OrderDirection,
+    OrderExecutionReportStatus,
     OrderType,
     PortfolioPosition,
     PortfolioResponse,
     PositionsResponse,
     PostOrderResponse,
+    StopOrderDirection,
+    StopOrderExpirationType,
+    StopOrderType,
 )
 from t_tech.invest.utils import money_to_decimal, quotation_to_decimal
 
@@ -283,6 +287,106 @@ async def cancel_order(order_id: str) -> None:
             order_id=order_id,
         )
     logger.info("Order cancelled", order_id=order_id)
+
+
+async def post_stop_order(
+    instrument_id: str,
+    quantity: int,
+    stop_price: Decimal,
+    direction: StopOrderDirection,
+    stop_order_type: StopOrderType = StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
+) -> str:
+    """
+    Выставить стоп-ордер (стоп-лосс или тейк-профит).
+
+    При срабатывании стоп-цены выставляется рыночный ордер.
+    Действует до отмены (GOOD_TILL_CANCEL).
+
+    Аргументы:
+        instrument_id:   UID инструмента
+        quantity:        количество лотов
+        stop_price:      цена срабатывания стопа
+        direction:       SELL для закрытия длинной позиции
+        stop_order_type: STOP_ORDER_TYPE_STOP_LOSS или STOP_ORDER_TYPE_TAKE_PROFIT
+
+    Возвращает:
+        stop_order_id — ID стоп-ордера для последующей отмены.
+    """
+    from t_tech.invest.utils import decimal_to_quotation
+    import uuid
+
+    async with get_client() as client:
+        response = await client.stop_orders.post_stop_order(
+            instrument_id=instrument_id,
+            quantity=quantity,
+            stop_price=decimal_to_quotation(stop_price),
+            direction=direction,
+            account_id=ACCOUNT_ID,
+            expiration_type=StopOrderExpirationType.STOP_ORDER_EXPIRATION_TYPE_GOOD_TILL_CANCEL,
+            stop_order_type=stop_order_type,
+            order_id=str(uuid.uuid4()),
+        )
+
+    logger.info(
+        "Stop order posted",
+        instrument_id=instrument_id,
+        quantity=quantity,
+        stop_price=str(stop_price),
+        direction=direction.name,
+        stop_order_type=stop_order_type.name,
+        stop_order_id=response.stop_order_id,
+    )
+    return response.stop_order_id
+
+
+async def cancel_stop_order(stop_order_id: str) -> None:
+    """
+    Отменить стоп-ордер.
+
+    Аргументы:
+        stop_order_id: ID стоп-ордера для отмены.
+    """
+    async with get_client() as client:
+        await client.stop_orders.cancel_stop_order(
+            account_id=ACCOUNT_ID,
+            stop_order_id=stop_order_id,
+        )
+    logger.info("Stop order cancelled", stop_order_id=stop_order_id)
+
+
+async def get_stop_order_ids() -> set[str]:
+    """
+    Получить множество ID всех активных стоп-ордеров по счёту.
+
+    Используется для проверки: если stop_order_id отсутствует в возвращённом
+    множестве — стоп-ордер либо исполнился, либо был отменён ранее.
+
+    Возвращает:
+        Множество строк stop_order_id.
+    """
+    async with get_client() as client:
+        response = await client.stop_orders.get_stop_orders(account_id=ACCOUNT_ID)
+    ids = {o.stop_order_id for o in response.stop_orders}
+    logger.debug("Active stop orders", count=len(ids))
+    return ids
+
+
+async def get_order_state(order_id: str) -> OrderExecutionReportStatus:
+    """
+    Получить статус исполнения обычной заявки.
+
+    Аргументы:
+        order_id: ID заявки (из PostOrderResponse).
+
+    Возвращает:
+        OrderExecutionReportStatus (FILL, CANCELLED, NEW и т.д.)
+    """
+    async with get_client() as client:
+        state = await client.orders.get_order_state(
+            account_id=ACCOUNT_ID,
+            order_id=order_id,
+        )
+    return state.execution_report_status
 
 
 async def get_open_orders() -> list[dict]:

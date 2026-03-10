@@ -1,0 +1,17 @@
+{
+  "trained_at": "2026-03-10T00:59:16",
+  "force_tune": true,
+  "f1_scores": {
+    "SBER": 0.4311,
+    "GAZP": 0.4435,
+    "LKOH": 0.4145,
+    "YDEX": 0.445,
+    "NVTK": 0.4279,
+    "GMKN": 0.427,
+    "MGNT": 0.4149,
+    "TATN": 0.4413,
+    "ROSN": 0.4323,
+    "MTSS": 0.4371
+  },
+  "failed": []
+}

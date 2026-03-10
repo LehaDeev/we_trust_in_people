@@ -1,0 +1,10 @@
+{
+  "n_estimators": 357,
+  "max_depth": 15,
+  "min_samples_split": 7,
+  "min_samples_leaf": 10,
+  "max_features": 0.8170487748579185,
+  "random_state": 42,
+  "n_jobs": -1,
+  "class_weight": "balanced"
+}

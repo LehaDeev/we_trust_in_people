@@ -1,0 +1,8 @@
+{
+  "C": 0.8744033783153196,
+  "gamma": "auto",
+  "kernel": "rbf",
+  "probability": true,
+  "class_weight": "balanced",
+  "random_state": 42
+}

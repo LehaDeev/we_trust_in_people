@@ -1,0 +1,13 @@
+{
+  "num_leaves": 83,
+  "learning_rate": 0.013751858556460984,
+  "n_estimators": 214,
+  "subsample": 0.8473476382649784,
+  "colsample_bytree": 0.8303478094245944,
+  "min_child_samples": 30,
+  "objective": "multiclass",
+  "num_class": 3,
+  "random_state": 42,
+  "verbose": -1,
+  "class_weight": "balanced"
+}

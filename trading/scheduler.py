@@ -33,7 +33,8 @@ from tinkoff.dividend_gap_stats import get_gap_protection_days_bulk
 from tinkoff.dividends import get_dividend_drops_bulk
 from tinkoff.instruments import get_instrument_by_ticker
 from tinkoff.market_data import get_last_prices
-from tinkoff.portfolio import get_rub_balance
+from tinkoff.portfolio import get_order_state, get_rub_balance, get_stop_order_ids
+from t_tech.invest.schemas import OrderExecutionReportStatus
 from trading import state
 from trading.executor import TradeExecutor
 from trading.notifier import notify_close, notify_insufficient_balance, notify_open
@@ -159,6 +160,14 @@ class TradingScheduler:
                         logger.warning("Ошибка получения дивидендных данных", error=str(e))
 
                 # ── 5. Проверяем SL/TP (всегда, независимо от рентабельности) ─
+
+                # Получаем ID активных стоп-ордеров один раз для всех позиций
+                active_stop_ids: set[str] = set()
+                try:
+                    active_stop_ids = await get_stop_order_ids()
+                except Exception as e:
+                    logger.warning("Не удалось получить список стоп-ордеров", error=str(e))
+
                 for trade in open_trades:
                     figi = asset_id_to_figi.get(trade.asset_id)
                     if not figi:
@@ -171,25 +180,41 @@ class TradingScheduler:
                     if not asset:
                         continue
 
-                    # Корректируем SL на размер дивиденда в экс-дивидендный день
-                    dividend_adj = dividend_drops.get(figi, Decimal("0"))
-                    effective_sl = max(
-                        trade.stop_loss_price - dividend_adj, Decimal("0.01")
-                    )
-                    if dividend_adj > 0:
-                        logger.info(
-                            "Дивидендная защита SL применена",
-                            ticker=asset.ticker,
-                            original_sl=str(trade.stop_loss_price),
-                            effective_sl=str(effective_sl),
-                            dividend_adj=str(dividend_adj),
-                        )
-
                     close_reason: str | None = None
-                    if current_price <= effective_sl:
-                        close_reason = "STOP_LOSS"
-                    elif current_price >= trade.take_profit_price:
-                        close_reason = "TAKE_PROFIT"
+
+                    # Приоритет: проверка биржевых ордеров (если были выставлены)
+                    if trade.tp_order_id:
+                        # Проверяем исполнение лимитного TP-ордера
+                        try:
+                            tp_status = await get_order_state(trade.tp_order_id)
+                            if tp_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL:
+                                close_reason = "TAKE_PROFIT"
+                        except Exception as e:
+                            logger.warning("Не удалось получить статус TP ордера",
+                                           order_id=trade.tp_order_id, error=str(e))
+
+                        # Проверяем исполнение стоп-ордера SL (пропал из активных → исполнился)
+                        if close_reason is None and trade.sl_stop_order_id:
+                            if trade.sl_stop_order_id not in active_stop_ids:
+                                close_reason = "STOP_LOSS"
+                    else:
+                        # Фолбэк: нет биржевых ордеров — сравниваем цену (старая логика)
+                        dividend_adj = dividend_drops.get(figi, Decimal("0"))
+                        effective_sl = max(
+                            trade.stop_loss_price - dividend_adj, Decimal("0.01")
+                        )
+                        if dividend_adj > 0:
+                            logger.info(
+                                "Дивидендная защита SL применена",
+                                ticker=asset.ticker,
+                                original_sl=str(trade.stop_loss_price),
+                                effective_sl=str(effective_sl),
+                                dividend_adj=str(dividend_adj),
+                            )
+                        if current_price <= effective_sl:
+                            close_reason = "STOP_LOSS"
+                        elif current_price >= trade.take_profit_price:
+                            close_reason = "TAKE_PROFIT"
 
                     if close_reason:
                         lot_size = getattr(trade, "lot_size", 1) or 1
