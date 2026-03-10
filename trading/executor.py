@@ -15,6 +15,7 @@ from t_tech.invest.utils import quotation_to_decimal
 from config.settings import trading_settings
 from db.models import Asset, Trade
 from db import trade_repo
+from tinkoff.market_data import get_min_price_increment
 from tinkoff.portfolio import (
     cancel_order,
     cancel_stop_order,
@@ -22,7 +23,13 @@ from tinkoff.portfolio import (
     post_market_order,
     post_stop_order,
 )
-from trading.profitability import adjusted_sl_price, adjusted_tp_price, calculate_pnl
+from trading.profitability import (
+    adjusted_sl_price,
+    adjusted_tp_price,
+    calculate_pnl,
+    round_sl_to_step,
+    round_tp_to_step,
+)
 from utils.logger import logger
 
 
@@ -106,11 +113,21 @@ class TradeExecutor:
         tp_order_id: str | None = None
         sl_stop_order_id: str | None = None
 
+        # Округляем цены до минимального шага инструмента (требование Tinkoff API)
+        try:
+            price_step = await get_min_price_increment(instrument_uid)
+        except Exception as e:
+            logger.warning("Не удалось получить шаг цены, использую 0.01", ticker=asset.ticker, error=str(e))
+            price_step = Decimal("0.01")
+
+        tp_price_rounded = round_tp_to_step(take_profit_price, price_step)
+        sl_price_rounded = round_sl_to_step(stop_loss_price, price_step)
+
         try:
             tp_order_id = (await post_limit_order(
                 instrument_id=instrument_uid,
                 quantity=lots,
-                price=take_profit_price,
+                price=tp_price_rounded,
                 direction=OrderDirection.ORDER_DIRECTION_SELL,
             )).order_id
         except Exception as e:
@@ -120,7 +137,7 @@ class TradeExecutor:
             sl_stop_order_id = await post_stop_order(
                 instrument_id=instrument_uid,
                 quantity=lots,
-                stop_price=stop_loss_price,
+                stop_price=sl_price_rounded,
                 direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
             )
         except Exception as e:
@@ -137,8 +154,8 @@ class TradeExecutor:
             trade_id=trade.id,
             entry_price=str(trade.entry_price),
             lot_size=lot_size,
-            stop_loss=str(stop_loss_price),
-            take_profit=str(take_profit_price),
+            stop_loss=str(sl_price_rounded),
+            take_profit=str(tp_price_rounded),
             tp_order_id=tp_order_id,
             sl_stop_order_id=sl_stop_order_id,
         )

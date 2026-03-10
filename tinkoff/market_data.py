@@ -15,6 +15,7 @@ from typing import AsyncGenerator
 from t_tech.invest.schemas import (
     CandleInterval,
     HistoricCandle,
+    InstrumentIdType,
     LastPrice,
     OrderBook,
 )
@@ -24,6 +25,10 @@ from config.settings import redis_settings
 from tinkoff.client import get_client
 from utils.logger import logger
 from utils.redis_cache import get_redis
+
+
+# Кеш минимального шага цены (меняется крайне редко, хранится в памяти)
+_step_cache: dict[str, Decimal] = {}
 
 
 # Удобные алиасы для часто используемых интервалов
@@ -251,3 +256,34 @@ async def fetch_multiple_instruments_prices(
         all_prices.update(result)
 
     return all_prices
+
+
+async def get_min_price_increment(instrument_id: str) -> Decimal:
+    """
+    Получить минимальный шаг цены для инструмента.
+
+    Результат кешируется в памяти процесса (min_price_increment меняется крайне редко).
+    При значении ≤ 0 возвращает фоллбэк 0.01 (копейка).
+
+    Аргументы:
+        instrument_id: FIGI инструмента
+
+    Возвращает:
+        Минимальный шаг цены (Decimal)
+    """
+    if instrument_id in _step_cache:
+        return _step_cache[instrument_id]
+
+    async with get_client() as client:
+        response = await client.instruments.get_instrument_by(
+            id_type=InstrumentIdType.INSTRUMENT_ID_TYPE_FIGI,
+            id=instrument_id,
+        )
+
+    step = quotation_to_decimal(response.instrument.min_price_increment)
+    if step <= Decimal("0"):
+        step = Decimal("0.01")
+
+    _step_cache[instrument_id] = step
+    logger.debug("Min price increment fetched", instrument_id=instrument_id, step=str(step))
+    return step

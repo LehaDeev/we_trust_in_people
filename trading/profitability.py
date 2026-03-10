@@ -16,7 +16,7 @@
     (налог не смещает точку безубыточности, только уменьшает прибыль выше неё)
 """
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, ROUND_DOWN, ROUND_UP
 
 from config.settings import trading_settings
 
@@ -123,6 +123,26 @@ def adjusted_sl_price(entry_price: Decimal, sl_pct: float) -> Decimal:
     c = Decimal(str(trading_settings.broker_commission_pct))
     sl = Decimal(str(sl_pct))
     return entry_price * (1 + c - sl) / (1 - c)
+
+
+def round_tp_to_step(price: Decimal, step: Decimal) -> Decimal:
+    """
+    Округлить цену тейк-профита вверх до минимального шага цены.
+
+    Округление вверх: лимитный ордер ставится чуть выше расчётного уровня,
+    что гарантирует достижение целевой доходности при исполнении.
+    """
+    return (price / step).to_integral_value(rounding=ROUND_UP) * step
+
+
+def round_sl_to_step(price: Decimal, step: Decimal) -> Decimal:
+    """
+    Округлить цену стоп-лосса вниз до минимального шага цены.
+
+    Округление вниз: стоп-ордер ставится чуть ниже расчётного уровня,
+    давая небольшой запас перед срабатыванием.
+    """
+    return (price / step).to_integral_value(rounding=ROUND_DOWN) * step
 
 
 def breakeven_pct() -> Decimal:
