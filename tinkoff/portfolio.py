@@ -371,22 +371,29 @@ async def get_stop_order_ids() -> set[str]:
     return ids
 
 
-async def get_order_state(order_id: str) -> OrderExecutionReportStatus:
+async def get_order_state(order_id: str) -> tuple[OrderExecutionReportStatus, Decimal | None]:
     """
-    Получить статус исполнения обычной заявки.
+    Получить статус и цену исполнения обычной заявки.
 
     Аргументы:
         order_id: ID заявки (из PostOrderResponse).
 
     Возвращает:
-        OrderExecutionReportStatus (FILL, CANCELLED, NEW и т.д.)
+        Кортеж (статус, цена_исполнения).
+        Цена исполнения — средняя цена сделки при FILL, None если ордер не исполнен.
     """
     async with get_client() as client:
         state = await client.orders.get_order_state(
             account_id=ACCOUNT_ID,
             order_id=order_id,
         )
-    return state.execution_report_status
+    executed_price: Decimal | None = None
+    if state.average_position_price:
+        try:
+            executed_price = quotation_to_decimal(state.average_position_price)
+        except Exception:
+            pass
+    return state.execution_report_status, executed_price
 
 
 async def get_active_order_ids() -> set[str]:

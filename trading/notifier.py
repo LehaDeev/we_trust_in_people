@@ -151,6 +151,7 @@ async def notify_close(
     gross_sign = "+" if gross_pnl >= 0 else ""
     net_sign = "+" if net_pnl >= 0 else ""
 
+    tax_line = f"НДФЛ:      −{tax:.2f} ₽\n" if tax > 0 else ""
     text = (
         f"{emoji} <b>Закрыта позиция {ticker}</b>\n"
         f"Причина: {label}\n"
@@ -158,7 +159,7 @@ async def notify_close(
         f"─────────────────\n"
         f"Gross P&L:  {gross_sign}{gross_pnl:.2f} ₽\n"
         f"Комиссии:  −{commission:.2f} ₽\n"
-        f"НДФЛ:      −{tax:.2f} ₽\n"
+        f"{tax_line}"
         f"─────────────────\n"
         f"<b>Чистый P&L: {net_sign}{net_pnl:.2f} ₽</b>"
     )

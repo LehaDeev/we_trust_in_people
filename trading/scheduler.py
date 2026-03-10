@@ -192,6 +192,7 @@ class TradingScheduler:
                         continue
 
                     close_reason: str | None = None
+                    tp_fill_price: Decimal | None = None
 
                     # Приоритет: проверка биржевых ордеров (если были выставлены)
                     if trade.tp_order_id:
@@ -200,7 +201,7 @@ class TradingScheduler:
                         tp_gone = limit_orders_fetched and trade.tp_order_id not in active_order_ids
                         if tp_gone:
                             try:
-                                tp_status = await get_order_state(trade.tp_order_id)
+                                tp_status, tp_fill_price = await get_order_state(trade.tp_order_id)
                                 if tp_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL:
                                     close_reason = "TAKE_PROFIT"
                             except Exception:
@@ -328,10 +329,16 @@ class TradingScheduler:
                             close_reason = "TAKE_PROFIT"
 
                     if close_reason:
+                        # При TP используем фактическую цену исполнения биржевого ордера
+                        exit_price_for_pnl = (
+                            tp_fill_price
+                            if close_reason == "TAKE_PROFIT" and tp_fill_price
+                            else current_price
+                        )
                         lot_size = getattr(trade, "lot_size", 1) or 1
                         breakdown = calculate_pnl(
                             entry_price=trade.entry_price,
-                            exit_price=current_price,
+                            exit_price=exit_price_for_pnl,
                             lots=trade.lots,
                             lot_size=lot_size,
                         )
@@ -339,6 +346,7 @@ class TradingScheduler:
                             "Срабатывание SL/TP",
                             ticker=asset.ticker,
                             reason=close_reason,
+                            exit_price=str(exit_price_for_pnl),
                             gross_pnl=str(breakdown.gross_pnl),
                             net_pnl=str(breakdown.net_pnl),
                         )
@@ -347,7 +355,7 @@ class TradingScheduler:
                             trade=trade,
                             asset=asset,
                             instrument_uid=figi,
-                            current_price=current_price,
+                            current_price=exit_price_for_pnl,
                             reason=close_reason,
                         )
                         open_by_asset.pop(trade.asset_id, None)
