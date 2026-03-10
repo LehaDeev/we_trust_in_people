@@ -17,6 +17,7 @@ from bot.handlers import portfolio, signals, start, trading
 from config.settings import telegram_settings
 from db.database import close_db, init_db
 from trading.notifier import set_bot
+from trading.order_watcher import OrderWatcher
 from trading.retrain_scheduler import RetrainScheduler
 from trading.scheduler import TradingScheduler
 from utils.logger import logger
@@ -60,14 +61,16 @@ async def main() -> None:
     # Запускаем планировщики как фоновые задачи
     scheduler_task = asyncio.create_task(TradingScheduler().run(), name="TradingScheduler")
     retrain_task = asyncio.create_task(RetrainScheduler().run(), name="RetrainScheduler")
+    watcher_task = asyncio.create_task(OrderWatcher().run(), name="OrderWatcher")
     scheduler_task.add_done_callback(_on_task_done)
     retrain_task.add_done_callback(_on_task_done)
+    watcher_task.add_done_callback(_on_task_done)
 
     logger.info("Бот запущен, начинаю polling...")
     try:
         await dp.start_polling(bot)
     finally:
-        for task in (scheduler_task, retrain_task):
+        for task in (scheduler_task, retrain_task, watcher_task):
             task.cancel()
             try:
                 await task

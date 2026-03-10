@@ -253,6 +253,9 @@ class TradingSettings(BaseSettings):
     # volume_ratio = объём последнего бара / SMA_20(объём).
     # 1.0 = фильтр отключён (любой объём); 1.3 = объём должен быть на 30% выше среднего.
     volume_min_ratio: float = Field(1.0, alias="TRADING_VOLUME_MIN_RATIO")
+    # Интервал быстрого polling SL стоп-ордеров в OrderWatcher (секунды).
+    # Чем меньше — тем быстрее обнаруживается срабатывание SL, но больше API-запросов.
+    order_poll_seconds: int = Field(30, alias="TRADING_ORDER_POLL_SECONDS")
 
     @property
     def dividend_override(self) -> dict[str, int]:
