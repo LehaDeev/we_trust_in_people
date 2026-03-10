@@ -197,9 +197,21 @@ class TradeExecutor:
 
         exit_price = current_price
 
-        # Если позиция закрывается по сигналу (не по биржевому ордеру) —
-        # отменяем ранее выставленные биржевые TP/SL ордера во избежание дублирования
-        if reason not in ("TAKE_PROFIT", "STOP_LOSS") or not trade.tp_order_id:
+        # Отмена биржевых ордеров по логике OCO:
+        # - SL сработал → отменяем TP (позицию уже закрыла биржа через SL)
+        # - TP сработал → отменяем SL (позицию уже закрыла биржа через TP)
+        # - Иной сигнал  → отменяем оба, затем выставляем рыночный SELL
+        if reason == "STOP_LOSS" and trade.tp_order_id:
+            try:
+                await cancel_order(trade.tp_order_id)
+            except Exception as e:
+                logger.warning("Не удалось отменить TP ордер после SL", order_id=trade.tp_order_id, error=str(e))
+        elif reason == "TAKE_PROFIT" and trade.sl_stop_order_id:
+            try:
+                await cancel_stop_order(trade.sl_stop_order_id)
+            except Exception as e:
+                logger.warning("Не удалось отменить SL стоп-ордер после TP", stop_order_id=trade.sl_stop_order_id, error=str(e))
+        else:
             if trade.tp_order_id:
                 try:
                     await cancel_order(trade.tp_order_id)

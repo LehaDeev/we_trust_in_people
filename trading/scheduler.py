@@ -163,8 +163,10 @@ class TradingScheduler:
 
                 # Получаем ID активных стоп-ордеров один раз для всех позиций
                 active_stop_ids: set[str] = set()
+                stop_orders_fetched: bool = False
                 try:
                     active_stop_ids = await get_stop_order_ids()
+                    stop_orders_fetched = True
                 except Exception as e:
                     logger.warning("Не удалось получить список стоп-ордеров", error=str(e))
 
@@ -194,9 +196,21 @@ class TradingScheduler:
                                            order_id=trade.tp_order_id, error=str(e))
 
                         # Проверяем исполнение стоп-ордера SL (пропал из активных → исполнился)
-                        if close_reason is None and trade.sl_stop_order_id:
+                        if close_reason is None and trade.sl_stop_order_id and stop_orders_fetched:
                             if trade.sl_stop_order_id not in active_stop_ids:
-                                close_reason = "STOP_LOSS"
+                                # Дополнительная проверка: если цена выше SL — ордер был
+                                # отменён биржей (не исполнился), а не сработал
+                                if current_price <= trade.stop_loss_price:
+                                    close_reason = "STOP_LOSS"
+                                else:
+                                    logger.warning(
+                                        "SL стоп-ордер исчез, но цена выше SL — вероятно отменён биржей, "
+                                        "переоткрываем стоп-ордер",
+                                        ticker=asset.ticker,
+                                        current_price=str(current_price),
+                                        stop_loss_price=str(trade.stop_loss_price),
+                                        sl_stop_order_id=trade.sl_stop_order_id,
+                                    )
                     else:
                         # Фолбэк: нет биржевых ордеров — сравниваем цену (старая логика)
                         dividend_adj = dividend_drops.get(figi, Decimal("0"))
