@@ -312,7 +312,56 @@ class TradingScheduler:
                                         error=str(re_e),
                                     )
                     else:
-                        # Фолбэк: нет биржевых ордеров — сравниваем цену (старая логика)
+                        # Нет ни TP ни SL ордеров — выставляем оба на бирже
+                        if _is_moex_session_open():
+                            try:
+                                price_step = await get_min_price_increment(figi)
+                                tp_rounded = round_tp_to_step(trade.take_profit_price, price_step)
+                                tp_resp = await post_limit_order(
+                                    instrument_id=figi,
+                                    quantity=trade.lots,
+                                    price=tp_rounded,
+                                    direction=OrderDirection.ORDER_DIRECTION_SELL,
+                                )
+                                trade.tp_order_id = tp_resp.order_id
+                                logger.info(
+                                    "TP ордер выставлен (не был создан при открытии)",
+                                    ticker=asset.ticker,
+                                    order_id=tp_resp.order_id,
+                                    price=str(tp_rounded),
+                                )
+                            except Exception as re_e:
+                                logger.error(
+                                    "Не удалось выставить TP ордер",
+                                    ticker=asset.ticker,
+                                    error=str(re_e),
+                                )
+                        try:
+                            price_step = await get_min_price_increment(figi)
+                            sl_rounded = round_sl_to_step(trade.stop_loss_price, price_step)
+                            new_sl_id = await post_stop_order(
+                                instrument_id=figi,
+                                quantity=trade.lots,
+                                stop_price=sl_rounded,
+                                direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                            )
+                            trade.sl_stop_order_id = new_sl_id
+                            logger.info(
+                                "SL стоп-ордер выставлен (не был создан при открытии)",
+                                ticker=asset.ticker,
+                                stop_order_id=new_sl_id,
+                            )
+                        except Exception as re_e:
+                            logger.error(
+                                "Не удалось выставить SL стоп-ордер",
+                                ticker=asset.ticker,
+                                error=str(re_e),
+                            )
+                        if trade.tp_order_id or trade.sl_stop_order_id:
+                            await trade_repo.update_trade(session, trade)
+                            continue
+
+                        # Фолбэк: не удалось выставить ордера — сравниваем цену
                         dividend_adj = dividend_drops.get(figi, Decimal("0"))
                         effective_sl = max(
                             trade.stop_loss_price - dividend_adj, Decimal("0.01")
