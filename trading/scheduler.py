@@ -19,7 +19,9 @@
     - Максимум TRADING_MAX_POSITIONS одновременно открытых позиций
 """
 import asyncio
+from datetime import time
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -204,36 +206,42 @@ class TradingScheduler:
                             except Exception:
                                 pass  # ордер заархивирован — считаем истёкшим
 
-                            # Не FILL (истёк или заархивирован) — перевыставляем TP
+                            # Не FILL (истёк или заархивирован) — перевыставляем TP если сессия открыта
                             if close_reason != "TAKE_PROFIT":
-                                logger.warning(
-                                    "TP ордер исчез (истёк или отменён), перевыставляем",
-                                    ticker=asset.ticker,
-                                    order_id=trade.tp_order_id,
-                                )
-                                try:
-                                    price_step = await get_min_price_increment(figi)
-                                    tp_rounded = round_tp_to_step(trade.take_profit_price, price_step)
-                                    tp_resp = await post_limit_order(
-                                        instrument_id=figi,
-                                        quantity=trade.lots,
-                                        price=tp_rounded,
-                                        direction=OrderDirection.ORDER_DIRECTION_SELL,
-                                    )
-                                    trade.tp_order_id = tp_resp.order_id
-                                    await trade_repo.update_trade(session, trade)
-                                    logger.info(
-                                        "TP ордер перевыставлен",
+                                if not _is_moex_session_open():
+                                    logger.debug(
+                                        "TP ордер исчез, но биржа закрыта — перевыставим позже",
                                         ticker=asset.ticker,
-                                        order_id=tp_resp.order_id,
-                                        price=str(tp_rounded),
                                     )
-                                except Exception as re_e:
-                                    logger.error(
-                                        "Не удалось перевыставить TP ордер",
+                                else:
+                                    logger.warning(
+                                        "TP ордер исчез (истёк или отменён), перевыставляем",
                                         ticker=asset.ticker,
-                                        error=str(re_e),
+                                        order_id=trade.tp_order_id,
                                     )
+                                    try:
+                                        price_step = await get_min_price_increment(figi)
+                                        tp_rounded = round_tp_to_step(trade.take_profit_price, price_step)
+                                        tp_resp = await post_limit_order(
+                                            instrument_id=figi,
+                                            quantity=trade.lots,
+                                            price=tp_rounded,
+                                            direction=OrderDirection.ORDER_DIRECTION_SELL,
+                                        )
+                                        trade.tp_order_id = tp_resp.order_id
+                                        await trade_repo.update_trade(session, trade)
+                                        logger.info(
+                                            "TP ордер перевыставлен",
+                                            ticker=asset.ticker,
+                                            order_id=tp_resp.order_id,
+                                            price=str(tp_rounded),
+                                        )
+                                    except Exception as re_e:
+                                        logger.error(
+                                            "Не удалось перевыставить TP ордер",
+                                            ticker=asset.ticker,
+                                            error=str(re_e),
+                                        )
 
                         # Если SL ордер не был выставлен при открытии (сбой API) — выставляем сейчас
                         if close_reason is None and not trade.sl_stop_order_id:
@@ -530,6 +538,23 @@ async def _fetch_price(figi: str) -> Decimal:
     except Exception as e:
         logger.error("Ошибка получения цены", figi=figi, error=str(e))
         return Decimal("0")
+
+
+def _is_moex_session_open() -> bool:
+    """
+    Проверить, открыта ли торговая сессия МОЕХ прямо сейчас.
+
+    Лимитные ордера (TP) принимаются только во время сессии:
+    - Основная:  10:00 – 18:50 МСК
+    - Вечерняя: 19:00 – 23:50 МСК
+
+    Стоп-ордера (SL) принимаются круглосуточно — эта проверка для них не нужна.
+    """
+    from datetime import datetime
+    now_msk = datetime.now(ZoneInfo("Europe/Moscow")).time()
+    main_open = time(10, 0) <= now_msk < time(18, 50)
+    evening_open = time(19, 0) <= now_msk < time(23, 50)
+    return main_open or evening_open
 
 
 async def _get_lot_size(ticker: str) -> int:
