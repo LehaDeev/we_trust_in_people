@@ -180,7 +180,7 @@ def _evaluate_ensemble(
         Среднее f1_macro по всем фолдам.
     """
     cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
-    scores = cross_val_score(ensemble, X, y, cv=cv, scoring="f1_macro", n_jobs=-1)
+    scores = cross_val_score(ensemble, X, y, cv=cv, scoring="f1_macro", n_jobs=1)
     mean_f1 = float(np.mean(scores))
     logger.info(
         "Оценка ансамбля (CV)",
@@ -335,15 +335,32 @@ def _train_single_ticker(
     # Для каждого тикера свой порог отбора — разные признаки могут быть важны
     # для банков (SBER), нефтяников (LKOH), IT-компаний (YDEX) и т.д.
     # CV-оценка и финальный фит выполняются уже на отобранных признаках.
+    # Кеш признаков: если features_{ticker_version}.json уже есть и force_tune=False
+    # — пропускаем первый фит, загружаем готовый список.
+    features_path = WEIGHTS_DIR / f"features_{ticker_version}.json"
     if threshold > 0.0:
-        _print_step(f"Отбор признаков (проход 1 из 2, порог >={threshold})...")
-        probe = _make_ensemble()
-        probe.fit(X, y)
-        selected_features = _select_by_threshold(probe, all_features, threshold)
-        dropped = len(all_features) - len(selected_features)
-        _print_ok(f"{len(selected_features)} из {len(all_features)} признаков (-{dropped})")
-        del probe
-        gc.collect()
+        cached_features: list[str] | None = None
+        if not force_tune and features_path.exists():
+            try:
+                with open(features_path) as f:
+                    cached_features = json.load(f)
+                # Проверяем что кешированные признаки — подмножество текущих
+                cached_features = [c for c in cached_features if c in all_features]
+            except Exception:
+                cached_features = None
+
+        if cached_features is not None:
+            _print_cached("Отбор признаков")
+            selected_features = cached_features
+        else:
+            _print_step(f"Отбор признаков (проход 1 из 2, порог >={threshold})...")
+            probe = _make_ensemble()
+            probe.fit(X, y)
+            selected_features = _select_by_threshold(probe, all_features, threshold)
+            dropped = len(all_features) - len(selected_features)
+            _print_ok(f"{len(selected_features)} из {len(all_features)} признаков (-{dropped})")
+            del probe
+            gc.collect()
         X_final = X[selected_features]
     else:
         # Отбор отключён — берём все признаки
@@ -365,7 +382,6 @@ def _train_single_ticker(
         _print_feature_importance(ensemble, selected_features, ticker)
 
     ensemble_path = WEIGHTS_DIR / f"ensemble_{ticker_version}.pkl"
-    features_path = WEIGHTS_DIR / f"features_{ticker_version}.json"
 
     with open(ensemble_path, "wb") as f:
         pickle.dump(ensemble, f)
