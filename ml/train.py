@@ -500,11 +500,23 @@ async def train_model(
     if results_path.exists():
         import shutil
         shutil.copy2(results_path, prev_path)
+    # При skip_cv F1 не вычислялся — берём сохранённые значения из предыдущего обучения
+    if skip_cv and prev_path.exists():
+        try:
+            with open(prev_path) as f_prev:
+                prev_data = json.load(f_prev)
+            prev_f1 = prev_data.get("f1_scores", {})
+            for ticker in f1_scores:
+                if f1_scores[ticker] == 0.0 and ticker in prev_f1:
+                    f1_scores[ticker] = prev_f1[ticker]
+        except Exception:
+            pass
     with open(results_path, "w") as f:
         json.dump(
             {
                 "trained_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
                 "force_tune": force_tune,
+                "skip_cv": skip_cv,
                 "f1_scores": f1_scores,
                 "failed": failed,
             },
