@@ -154,6 +154,11 @@ class MLSettings(BaseSettings):
     # После использования вернуть в false, иначе HPO будет запускаться каждый раз.
     force_tune: bool = Field(False, alias="ML_FORCE_TUNE")
 
+    # Максимальное число моделей в in-memory LRU-кеше.
+    # Тикеры обрабатываются поочерёдно → достаточно 1.
+    # Увеличить если нужен параллельный инференс нескольких тикеров.
+    model_cache_size: int = Field(1, alias="ML_MODEL_CACHE_SIZE")
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

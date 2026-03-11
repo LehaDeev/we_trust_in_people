@@ -19,6 +19,7 @@
 """
 import json
 import pickle
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
@@ -32,9 +33,11 @@ from utils.redis_cache import get_redis
 
 WEIGHTS_DIR = Path(__file__).parent / "weights"
 
-# In-memory кеш загруженных моделей: "{ticker}_{version}" → (ensemble, feature_columns)
-# Каждый тикер хранит свой ансамбль отдельно.
-_model_cache: dict[str, tuple] = {}
+# LRU-кеш загруженных моделей: "{ticker}_{version}" → (ensemble, feature_columns).
+# Размер ограничен ML_MODEL_CACHE_SIZE (по умолчанию 1) — вытесняет старую модель
+# при загрузке новой, освобождая память. Тикеры обрабатываются поочерёдно,
+# поэтому держать более одной модели в RAM нет смысла.
+_model_cache: OrderedDict[str, tuple] = OrderedDict()
 
 
 def _load_model(ticker: str, version: str) -> tuple:
@@ -53,6 +56,8 @@ def _load_model(ticker: str, version: str) -> tuple:
     """
     cache_key = f"{ticker}_{version}"
     if cache_key in _model_cache:
+        # Переместить в конец — LRU: только что использован
+        _model_cache.move_to_end(cache_key)
         return _model_cache[cache_key]
 
     ticker_version = f"{ticker}_{version}"
@@ -72,6 +77,12 @@ def _load_model(ticker: str, version: str) -> tuple:
 
     _model_cache[cache_key] = (ensemble, feature_columns)
     logger.info("Модель загружена в память", ticker=ticker, version=version)
+
+    # Вытеснить самую старую запись если превышен лимит LRU-кеша
+    while len(_model_cache) > ml_settings.model_cache_size:
+        evicted, _ = _model_cache.popitem(last=False)
+        logger.info("Модель вытеснена из LRU-кеша", key=evicted)
+
     return ensemble, feature_columns
 
 
