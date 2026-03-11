@@ -18,6 +18,7 @@
 import gc
 import json
 import pickle
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -514,7 +515,7 @@ async def train_model(
     with open(results_path, "w") as f:
         json.dump(
             {
-                "trained_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+                "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "force_tune": force_tune,
                 "skip_cv": skip_cv,
                 "f1_scores": f1_scores,

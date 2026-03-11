@@ -259,9 +259,10 @@ def _ml_nightly_status(trained_msk: datetime, force_tune: bool) -> str:
     покрывает ночной запуск в любом часовом поясе и ручной запуск.
     """
     hours_ago = (datetime.now(_RETRAIN_TZ) - trained_msk).total_seconds() / 3600
-    if hours_ago <= 26:
+    if abs(hours_ago) <= 26:
         label = "ручной с Optuna" if force_tune else "ночной"
-        return f"✅ Да  ({label}, {hours_ago:.0f}ч назад)"
+        h = max(0, round(hours_ago))
+        return f"✅ Да  ({label}, {h}ч назад)"
     return f"⚠️ Нет  (последнее {trained_msk.strftime('%d.%m %H:%M')} МСК, {hours_ago:.0f}ч назад)"
 
 
