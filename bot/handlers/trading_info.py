@@ -253,15 +253,16 @@ _RETRAIN_TZ = zoneinfo.ZoneInfo("Europe/Moscow")
 
 
 def _ml_nightly_status(trained_msk: datetime, force_tune: bool) -> str:
-    """Сформировать строку статуса ночного дообучения."""
-    today = datetime.now(_RETRAIN_TZ).date()
-    if trained_msk.date() == today and not force_tune:
-        return "✅ Да  (ночной, сегодня)"
-    elif trained_msk.date() == today and force_tune:
-        return "✅ Да  (ручной с Optuna, сегодня)"
-    else:
-        hours_ago = (datetime.now(_RETRAIN_TZ) - trained_msk).total_seconds() / 3600
-        return f"⚠️ Нет  (последнее {trained_msk.strftime('%d.%m %H:%M')} МСК, {hours_ago:.0f}ч назад)"
+    """Сформировать строку статуса ночного дообучения.
+
+    Считается «обучение сегодня» если прошло не более 26 часов —
+    покрывает ночной запуск в любом часовом поясе и ручной запуск.
+    """
+    hours_ago = (datetime.now(_RETRAIN_TZ) - trained_msk).total_seconds() / 3600
+    if hours_ago <= 26:
+        label = "ручной с Optuna" if force_tune else "ночной"
+        return f"✅ Да  ({label}, {hours_ago:.0f}ч назад)"
+    return f"⚠️ Нет  (последнее {trained_msk.strftime('%d.%m %H:%M')} МСК, {hours_ago:.0f}ч назад)"
 
 
 @router.callback_query(lambda c: c.data == "trading:ml_status")
