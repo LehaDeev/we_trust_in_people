@@ -289,10 +289,35 @@ async def cb_ml_status(callback: CallbackQuery) -> None:
         f1_scores: dict[str, float] = data["f1_scores"]
         failed: list[str] = data.get("failed", [])
 
+        # Загружаем предыдущие результаты для сравнения дельты
+        prev_path = _RESULTS_PATH.parent / "last_results_prev.json"
+        prev_f1: dict[str, float] = {}
+        if prev_path.exists():
+            try:
+                with open(prev_path) as pf:
+                    prev_f1 = json.load(pf).get("f1_scores", {})
+            except Exception:
+                pass
+
         avg = sum(f1_scores.values()) / len(f1_scores) if f1_scores else 0.0
+        prev_avg = sum(prev_f1.values()) / len(prev_f1) if prev_f1 else None
+
+        def _delta(ticker: str, cur: float) -> str:
+            if ticker not in prev_f1:
+                return ""
+            d = cur - prev_f1[ticker]
+            if abs(d) < 0.0001:
+                return " (=)"
+            return f" ({'+' if d > 0 else ''}{d:+.4f})"
+
         f1_lines = "\n".join(
-            f"  {ticker:<6} {f1:.4f}" for ticker, f1 in sorted(f1_scores.items())
+            f"  {ticker:<6} {f1:.4f}{_delta(ticker, f1)}"
+            for ticker, f1 in sorted(f1_scores.items())
         )
+        avg_delta = ""
+        if prev_avg is not None:
+            d = avg - prev_avg
+            avg_delta = f" ({'+' if d > 0 else ''}{d:+.4f})" if abs(d) >= 0.0001 else " (=)"
         failed_str = f"\n\n⚠️ Ошибки: {', '.join(failed)}" if failed else ""
 
         text = (
@@ -300,7 +325,7 @@ async def cb_ml_status(callback: CallbackQuery) -> None:
             f"Последнее обучение:  <b>{trained_msk.strftime('%d.%m.%Y %H:%M')} МСК</b>\n"
             f"Ночное сегодня:      <b>{_ml_nightly_status(trained_msk, force_tune)}</b>\n"
             f"Optuna (force_tune): <b>{'Да' if force_tune else 'Нет'}</b>\n\n"
-            f"<b>F1 по тикерам:</b>\n<code>{f1_lines}\n{'─'*14}\n  {'Среднее':<6} {avg:.4f}</code>"
+            f"<b>F1 по тикерам:</b>\n<code>{f1_lines}\n{'─'*18}\n  {'Среднее':<6} {avg:.4f}{avg_delta}</code>"
             f"{failed_str}"
         )
     except Exception as e:

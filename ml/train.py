@@ -471,6 +471,11 @@ async def train_model(
 
     # Сохраняем метрики последнего обучения для быстрого просмотра
     results_path = WEIGHTS_DIR / "last_results.json"
+    prev_path = WEIGHTS_DIR / "last_results_prev.json"
+    # Перед перезаписью сохраняем предыдущий результат для сравнения дельты в боте
+    if results_path.exists():
+        import shutil
+        shutil.copy2(results_path, prev_path)
     with open(results_path, "w") as f:
         json.dump(
             {
