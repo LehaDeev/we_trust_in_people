@@ -47,6 +47,7 @@
 | `RETRAIN_MINUTE` | Минута запуска (0–59) | `0` |
 | `RETRAIN_TIMEZONE` | Часовой пояс (IANA) | `Europe/Moscow` |
 | `RETRAIN_FORCE_TUNE` | Перезапустить Optuna HPO (занимает часы) | `false` |
+| `RETRAIN_CATCHUP_HOURS` | Наверстывание: запустить сразу если бот стартовал не позднее N часов после RETRAIN_HOUR | `8` |
 
 ## Redis
 

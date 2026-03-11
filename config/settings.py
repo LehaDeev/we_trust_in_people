@@ -300,6 +300,9 @@ class RetrainSettings(BaseSettings):
     # Принудительный перезапуск Optuna HPO при ночном переобучении.
     # Оставить false — HPO занимает часы, нецелесообразно каждую ночь.
     force_tune: bool = Field(False, alias="RETRAIN_FORCE_TUNE")
+    # Окно наверстывания (часов): если бот запустился после RETRAIN_HOUR,
+    # но не позднее чем через N часов — запустить дообучение сразу.
+    catchup_hours: int = Field(8, alias="RETRAIN_CATCHUP_HOURS")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
