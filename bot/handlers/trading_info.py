@@ -4,8 +4,13 @@ Handlers информационных экранов торговли:
     - история последних сделок
     - агрегированная статистика
     - параметры автоторговли
+    - статус ML-моделей и ночного обучения
 """
+import json
+import zoneinfo
+from datetime import datetime
 from decimal import Decimal
+from pathlib import Path
 
 from aiogram import Router
 from aiogram.types import CallbackQuery
@@ -238,6 +243,70 @@ async def cb_status(callback: CallbackQuery) -> None:
         f"Тейк-профит:  цена растёт на  <b>+{tp_gross_pct:.2f}%</b> → чистая прибыль <b>+{cfg.take_profit_pct * 100:.1f}%</b>\n\n"
         "<i>Параметры меняются в файле .env</i>"
     )
+    await callback.message.edit_text(
+        text, reply_markup=back_to_trading(), parse_mode="HTML"
+    )
+
+
+_RESULTS_PATH = Path("ml/weights/last_results.json")
+_RETRAIN_TZ = zoneinfo.ZoneInfo("Europe/Moscow")
+
+
+def _ml_nightly_status(trained_msk: datetime, force_tune: bool) -> str:
+    """Сформировать строку статуса ночного дообучения."""
+    today = datetime.now(_RETRAIN_TZ).date()
+    if trained_msk.date() == today and not force_tune:
+        return "✅ Да  (ночной, сегодня)"
+    elif trained_msk.date() == today and force_tune:
+        return "✅ Да  (ручной с Optuna, сегодня)"
+    else:
+        hours_ago = (datetime.now(_RETRAIN_TZ) - trained_msk).total_seconds() / 3600
+        return f"⚠️ Нет  (последнее {trained_msk.strftime('%d.%m %H:%M')} МСК, {hours_ago:.0f}ч назад)"
+
+
+@router.callback_query(lambda c: c.data == "trading:ml_status")
+async def cb_ml_status(callback: CallbackQuery) -> None:
+    """Показать статус ML-моделей: дата обучения, ночное обучение, F1 по тикерам."""
+    await callback.answer("⏳ Загружаю данные моделей...")
+
+    if not _RESULTS_PATH.exists():
+        await callback.message.edit_text(
+            "🧠 <b>ML модели</b>\n\n❌ Файл метрик не найден. Запустите обучение.",
+            reply_markup=back_to_trading(),
+            parse_mode="HTML",
+        )
+        return
+
+    try:
+        with open(_RESULTS_PATH) as f:
+            data = json.load(f)
+
+        trained_at = datetime.fromisoformat(data["trained_at"])
+        if trained_at.tzinfo is None:
+            trained_at = trained_at.replace(tzinfo=zoneinfo.ZoneInfo("UTC"))
+        trained_msk = trained_at.astimezone(_RETRAIN_TZ)
+        force_tune: bool = data["force_tune"]
+        f1_scores: dict[str, float] = data["f1_scores"]
+        failed: list[str] = data.get("failed", [])
+
+        avg = sum(f1_scores.values()) / len(f1_scores) if f1_scores else 0.0
+        f1_lines = "\n".join(
+            f"  {ticker:<6} {f1:.4f}" for ticker, f1 in sorted(f1_scores.items())
+        )
+        failed_str = f"\n\n⚠️ Ошибки: {', '.join(failed)}" if failed else ""
+
+        text = (
+            "🧠 <b>ML модели</b>\n\n"
+            f"Последнее обучение:  <b>{trained_msk.strftime('%d.%m.%Y %H:%M')} МСК</b>\n"
+            f"Ночное сегодня:      <b>{_ml_nightly_status(trained_msk, force_tune)}</b>\n"
+            f"Optuna (force_tune): <b>{'Да' if force_tune else 'Нет'}</b>\n\n"
+            f"<b>F1 по тикерам:</b>\n<code>{f1_lines}\n{'─'*14}\n  {'Среднее':<6} {avg:.4f}</code>"
+            f"{failed_str}"
+        )
+    except Exception as e:
+        logger.error("Ошибка загрузки метрик ML", error=str(e))
+        text = "❌ Не удалось загрузить данные моделей."
+
     await callback.message.edit_text(
         text, reply_markup=back_to_trading(), parse_mode="HTML"
     )
