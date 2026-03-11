@@ -43,14 +43,21 @@ def _parse_args() -> argparse.Namespace:
         default=None,
         help="Папка с CSV-файлами (для Colab без PostgreSQL). Пример: ml/data",
     )
+    parser.add_argument(
+        "--skip-cv",
+        action="store_true",
+        default=False,
+        help="Пропустить CV-оценку — только финальный фит (быстрее, меньше RAM для ночного переобучения)",
+    )
     return parser.parse_args()
 
 
-async def main(force_tune: bool, data_dir: Path | None) -> None:
+async def main(force_tune: bool, data_dir: Path | None, skip_cv: bool = False) -> None:
     """Инициализировать БД (если нет data_dir), обучить ансамбль, закрыть соединение."""
     logger.info(
         "Запуск pipeline обучения ансамбля",
         force_tune=force_tune,
+        skip_cv=skip_cv,
         data_dir=str(data_dir) if data_dir else "PostgreSQL",
     )
 
@@ -58,7 +65,7 @@ async def main(force_tune: bool, data_dir: Path | None) -> None:
         await init_db()
 
     try:
-        results = await train_model(force_tune=force_tune, data_dir=data_dir)
+        results = await train_model(force_tune=force_tune, data_dir=data_dir, skip_cv=skip_cv)
         logger.info(
             "Обучение завершено",
             trained=list(results.keys()),
@@ -74,4 +81,4 @@ if __name__ == "__main__":
     # CLI-флаг переопределяет значение из .env
     force_tune = args.force_tune or ml_settings.force_tune
     data_dir = Path(args.data_dir) if args.data_dir else None
-    asyncio.run(main(force_tune=force_tune, data_dir=data_dir))
+    asyncio.run(main(force_tune=force_tune, data_dir=data_dir, skip_cv=args.skip_cv))

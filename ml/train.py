@@ -267,6 +267,7 @@ def _train_single_ticker(
     ticker: str,
     group: pd.DataFrame,
     force_tune: bool,
+    skip_cv: bool = False,
 ) -> tuple[Path, float]:
     """
     Полный pipeline обучения для одного тикера.
@@ -275,9 +276,10 @@ def _train_single_ticker(
         ticker:     тикер инструмента.
         group:      DataFrame свечей этого тикера.
         force_tune: принудительно запустить Optuna.
+        skip_cv:    пропустить CV-оценку (для ночного переобучения — экономит RAM и время).
 
     Возвращает:
-        Path к сохранённому pkl ансамбля.
+        (Path к сохранённому pkl ансамбля, F1 из CV или 0.0 если skip_cv=True).
     """
     version = ml_settings.model_version
     ticker_version = f"{ticker}_{version}"
@@ -324,7 +326,7 @@ def _train_single_ticker(
                 _scaled("et", ExtraTreesClassifier(**et_params)),
             ],
             voting="soft",
-            n_jobs=-1,  # параллельный фит базовых моделей
+            n_jobs=1,  # последовательный фит — меньше RAM на слабом сервере
         )
 
     all_features = X.columns.tolist()
@@ -367,12 +369,16 @@ def _train_single_ticker(
         selected_features = all_features
         X_final = X
 
-    # ── Проход 2: CV + финальный фит на отобранных признаках ─────────────────
+    # ── Проход 2: CV (опционально) + финальный фит на отобранных признаках ──
     ensemble = _make_ensemble()
 
-    _print_step("CV оценка ансамбля...")
-    cv_f1 = _evaluate_ensemble(ensemble, X_final, y, ticker)
-    _print_ok(f"F1={cv_f1:.4f}")
+    if skip_cv:
+        print("    CV оценка   [пропущена — skip_cv]", flush=True)
+        cv_f1 = 0.0
+    else:
+        _print_step("CV оценка ансамбля...")
+        cv_f1 = _evaluate_ensemble(ensemble, X_final, y, ticker)
+        _print_ok(f"F1={cv_f1:.4f}")
 
     _print_step("Финальное обучение ансамбля...")
     ensemble.fit(X_final, y)
@@ -401,6 +407,7 @@ def _train_single_ticker(
 async def train_model(
     force_tune: bool = False,
     data_dir: Optional[Path] = None,
+    skip_cv: bool = False,
 ) -> dict[str, Path]:
     """
     Обучить отдельный ансамбль для каждого тикера из DATA_TICKERS.
@@ -412,6 +419,7 @@ async def train_model(
         force_tune: если True — принудительно запустить Optuna для всех моделей.
         data_dir:   папка с CSV-файлами (для Colab без PostgreSQL).
                     Если None — данные загружаются из PostgreSQL.
+        skip_cv:    пропустить CV-оценку (флаг --skip-cv для ночного переобучения).
 
     Возвращает:
         Словарь {ticker: Path} для успешно обученных тикеров.
@@ -472,7 +480,7 @@ async def train_model(
         _print_ticker_header(ticker, i, total, len(group))
         logger.info("Обучение модели", ticker=ticker)
         try:
-            path, cv_f1 = _train_single_ticker(ticker, group, force_tune)
+            path, cv_f1 = _train_single_ticker(ticker, group, force_tune, skip_cv=skip_cv)
             results[ticker] = path
             f1_scores[ticker] = round(cv_f1, 4)
         except Exception as e:
