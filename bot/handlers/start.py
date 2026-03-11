@@ -7,6 +7,7 @@ from aiogram.types import CallbackQuery, Message
 
 from bot.keyboards import back_to_main, main_menu, ticker_select
 from config.settings import data_settings
+from trading.notifier import set_menu_message
 
 router = Router(name="start")
 
@@ -20,7 +21,8 @@ _WELCOME = (
 @router.message(CommandStart())
 async def cmd_start(message: Message) -> None:
     """Ответить на /start главным меню."""
-    await message.answer(_WELCOME, reply_markup=main_menu(), parse_mode="HTML")
+    msg = await message.answer(_WELCOME, reply_markup=main_menu(), parse_mode="HTML")
+    set_menu_message(msg.message_id)
 
 
 @router.callback_query(lambda c: c.data == "menu:main")

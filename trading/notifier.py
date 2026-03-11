@@ -14,6 +14,8 @@ from utils.logger import logger
 
 # Синглтон бота — устанавливается из bot/main.py при старте
 _bot: Bot | None = None
+# ID последнего сообщения с меню в чате уведомлений (для перемещения вниз)
+_menu_msg_id: int | None = None
 
 
 def set_bot(bot: Bot) -> None:
@@ -28,6 +30,52 @@ def set_bot(bot: Bot) -> None:
     global _bot
     _bot = bot
     logger.debug("Notifier: Bot-синглтон установлен")
+
+
+def set_menu_message(msg_id: int) -> None:
+    """
+    Сохранить ID текущего сообщения с меню.
+
+    Вызывать из handlers при отображении главного меню.
+
+    Аргументы:
+        msg_id: message_id сообщения с inline-меню.
+    """
+    global _menu_msg_id
+    _menu_msg_id = msg_id
+
+
+async def _refresh_menu() -> None:
+    """Удалить старое меню и отправить новое снизу (после уведомления).
+
+    Если меню ещё не открывалось (_menu_msg_id is None) — ничего не делает.
+    """
+    from bot.keyboards import main_menu  # импорт здесь во избежание circular import
+
+    if _menu_msg_id is None or _bot is None:
+        return
+
+    chat_id = trading_settings.notification_chat_id
+    if not chat_id:
+        return
+
+    # Удаляем старое меню
+    try:
+        await _bot.delete_message(chat_id=chat_id, message_id=_menu_msg_id)
+    except Exception:
+        pass  # сообщение уже удалено или недоступно
+
+    # Отправляем новое меню снизу
+    try:
+        msg = await _bot.send_message(
+            chat_id=chat_id,
+            text="👋 <b>We Trust in People</b>\n\nВыберите действие:",
+            reply_markup=main_menu(),
+            parse_mode="HTML",
+        )
+        set_menu_message(msg.message_id)
+    except Exception as e:
+        logger.error("Ошибка обновления меню после уведомления", error=str(e))
 
 
 async def _send(text: str) -> None:
@@ -53,6 +101,7 @@ async def _send(text: str) -> None:
     try:
         await _bot.send_message(chat_id=chat_id, text=text, parse_mode="HTML")
         logger.debug("Уведомление отправлено", chat_id=chat_id)
+        await _refresh_menu()
     except Exception as e:
         logger.error("Ошибка отправки уведомления", error=str(e), text=text[:80])
 
