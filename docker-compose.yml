@@ -48,6 +48,10 @@ services:
       # Веса моделей хранятся на хосте — не теряются при пересборке образа.
       # После обучения вне Docker скопировать веса в ./ml/weights/
       - ./ml/weights:/app/ml/weights
+    # Ограничение памяти: бот + ночное обучение не должны уходить в swap.
+    # При превышении лимита OOM-killer убьёт subprocess обучения, но не бот.
+    mem_limit: 1400m
+    memswap_limit: 1400m
     depends_on:
       postgres:
         condition: service_healthy
