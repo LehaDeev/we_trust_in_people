@@ -5,9 +5,32 @@
     python -m scripts.show_results
 """
 import json
+import zoneinfo
+from datetime import datetime
 from pathlib import Path
 
 RESULTS_PATH = Path("ml/weights/last_results.json")
+RETRAIN_TZ = zoneinfo.ZoneInfo("Europe/Moscow")
+
+
+def _nightly_status(trained_at_str: str, force_tune: bool) -> str:
+    """Определить статус ночного дообучения относительно сегодняшнего дня."""
+    try:
+        trained_at = datetime.fromisoformat(trained_at_str)
+        if trained_at.tzinfo is None:
+            trained_at = trained_at.replace(tzinfo=zoneinfo.ZoneInfo("UTC"))
+        trained_msk = trained_at.astimezone(RETRAIN_TZ)
+        today_msk = datetime.now(RETRAIN_TZ).date()
+
+        if trained_msk.date() == today_msk and not force_tune:
+            return "ДА ✓  (ночной, сегодня)"
+        elif trained_msk.date() == today_msk and force_tune:
+            return "ДА ✓  (ручной с Optuna, сегодня)"
+        else:
+            hours_ago = (datetime.now(RETRAIN_TZ) - trained_msk).total_seconds() / 3600
+            return f"НЕТ ⚠  (последнее {trained_msk.strftime('%d.%m %H:%M')} МСК, {hours_ago:.0f}ч назад)"
+    except Exception:
+        return "неизвестно"
 
 
 def main() -> None:
@@ -19,8 +42,12 @@ def main() -> None:
     with open(RESULTS_PATH) as f:
         data = json.load(f)
 
-    print(f"\nДата обучения : {data['trained_at']}")
-    print(f"force_tune    : {data['force_tune']}")
+    trained_at: str = data["trained_at"]
+    force_tune: bool = data["force_tune"]
+
+    print(f"\nДата обучения   : {trained_at}")
+    print(f"Ночное сегодня  : {_nightly_status(trained_at, force_tune)}")
+    print(f"force_tune      : {force_tune}")
     print()
     print(f"{'Тикер':<8} {'F1':>8}")
     print("-" * 18)
