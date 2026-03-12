@@ -46,15 +46,19 @@ class RetrainScheduler:
             timezone=retrain_settings.timezone,
         )
 
+        last_retrain_date: datetime | None = None
         while True:
-            await self._wait_until_next_run()
+            await self._wait_until_next_run(last_retrain_date)
             await self._retrain()
+            tz = zoneinfo.ZoneInfo(retrain_settings.timezone)
+            last_retrain_date = datetime.now(tz).date()
 
-    async def _wait_until_next_run(self) -> None:
+    async def _wait_until_next_run(self, last_retrain_date=None) -> None:
         """Рассчитать время до следующего запуска и переждать его.
 
         Если бот запустился после RETRAIN_HOUR, но в пределах RETRAIN_CATCHUP_HOURS —
         запускает дообучение немедленно (наверстывание пропущенного окна).
+        Повторный catchup в рамках одного дня не выполняется.
         """
         tz = zoneinfo.ZoneInfo(retrain_settings.timezone)
         now = datetime.now(tz)
@@ -66,10 +70,12 @@ class RetrainScheduler:
         )
 
         # Наверстывание: если плановое время уже прошло сегодня,
-        # но не более чем RETRAIN_CATCHUP_HOURS часов назад — запустить сразу
+        # но не более чем RETRAIN_CATCHUP_HOURS часов назад — запустить сразу.
+        # Пропускаем если уже обучались сегодня (защита от повторного запуска в цикле).
         missed_seconds = (now - scheduled_today).total_seconds()
         catchup_window = retrain_settings.catchup_hours * 3600
-        if 0 < missed_seconds <= catchup_window:
+        already_ran_today = last_retrain_date is not None and last_retrain_date == now.date()
+        if 0 < missed_seconds <= catchup_window and not already_ran_today:
             logger.info(
                 "Пропущенное дообучение: запуск немедленно (catchup)",
                 scheduled_at=scheduled_today.strftime("%Y-%m-%d %H:%M %Z"),
