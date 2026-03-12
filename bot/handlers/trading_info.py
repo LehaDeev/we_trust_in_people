@@ -310,7 +310,7 @@ async def cb_ml_status(callback: CallbackQuery) -> None:
             d = cur - prev_f1[ticker]
             if abs(d) < 0.0001:
                 return " (=)"
-            return f" ({'+' if d > 0 else ''}{d:+.4f})"
+            return f" ({d:+.4f})"
 
         f1_lines = "\n".join(
             f"  {ticker:<6} {f1:.4f}{_delta(ticker, f1)}"
@@ -319,7 +319,7 @@ async def cb_ml_status(callback: CallbackQuery) -> None:
         avg_delta = ""
         if prev_avg is not None:
             d = avg - prev_avg
-            avg_delta = f" ({'+' if d > 0 else ''}{d:+.4f})" if abs(d) >= 0.0001 else " (=)"
+            avg_delta = f" ({d:+.4f})" if abs(d) >= 0.0001 else " (=)"
         failed_str = f"\n\n⚠️ Ошибки: {', '.join(failed)}" if failed else ""
 
         text = (
