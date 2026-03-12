@@ -133,7 +133,7 @@ class RetrainScheduler:
             # nice -n 19: минимальный приоритет CPU (бот и другие процессы получают CPU первыми)
             # ionice -c 3: idle I/O — обучение читает диск только когда никто не ждёт
             cmd = ["nice", "-n", "19", "ionice", "-c", "3",
-                   "python", "-m", "scripts.train_model", "--skip-cv"]
+                   "python", "-m", "scripts.train_model"]
             if retrain_settings.force_tune:
                 cmd.append("--force-tune")
             proc = await asyncio.create_subprocess_exec(
