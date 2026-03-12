@@ -53,6 +53,7 @@ async def set_menu_message(msg_id: int) -> None:
 
 async def _get_menu_msg_id() -> int | None:
     """Получить ID меню: сначала из памяти, при None — из Redis."""
+    global _menu_msg_id
     if _menu_msg_id is not None:
         return _menu_msg_id
     redis = await get_redis()
@@ -61,7 +62,6 @@ async def _get_menu_msg_id() -> int | None:
     val = await redis.get(_MENU_MSG_REDIS_KEY)
     if val is None:
         return None
-    global _menu_msg_id
     _menu_msg_id = int(val)
     return _menu_msg_id
 
