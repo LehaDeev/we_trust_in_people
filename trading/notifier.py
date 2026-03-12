@@ -11,11 +11,13 @@ from aiogram import Bot
 
 from config.settings import trading_settings
 from utils.logger import logger
+from utils.redis_cache import get_redis
 
 # Синглтон бота — устанавливается из bot/main.py при старте
 _bot: Bot | None = None
-# ID последнего сообщения с меню в чате уведомлений (для перемещения вниз)
+# ID последнего сообщения с меню (in-memory кеш, персистируется в Redis)
 _menu_msg_id: int | None = None
+_MENU_MSG_REDIS_KEY = "menu_msg_id"
 
 
 def set_bot(bot: Bot) -> None:
@@ -32,27 +34,47 @@ def set_bot(bot: Bot) -> None:
     logger.debug("Notifier: Bot-синглтон установлен")
 
 
-def set_menu_message(msg_id: int) -> None:
+async def set_menu_message(msg_id: int) -> None:
     """
-    Сохранить ID текущего сообщения с меню.
+    Сохранить ID текущего сообщения с меню (в памяти и в Redis).
 
     Вызывать из handlers при отображении главного меню.
+    Redis обеспечивает сохранение ID между перезапусками бота.
 
     Аргументы:
         msg_id: message_id сообщения с inline-меню.
     """
     global _menu_msg_id
     _menu_msg_id = msg_id
+    redis = await get_redis()
+    if redis is not None:
+        await redis.set(_MENU_MSG_REDIS_KEY, str(msg_id))
+
+
+async def _get_menu_msg_id() -> int | None:
+    """Получить ID меню: сначала из памяти, при None — из Redis."""
+    if _menu_msg_id is not None:
+        return _menu_msg_id
+    redis = await get_redis()
+    if redis is None:
+        return None
+    val = await redis.get(_MENU_MSG_REDIS_KEY)
+    if val is None:
+        return None
+    global _menu_msg_id
+    _menu_msg_id = int(val)
+    return _menu_msg_id
 
 
 async def _refresh_menu() -> None:
     """Удалить старое меню и отправить новое снизу (после уведомления).
 
-    Если меню ещё не открывалось (_menu_msg_id is None) — ничего не делает.
+    ID меню читается из Redis — работает корректно после перезапуска бота.
     """
     from bot.keyboards import main_menu  # импорт здесь во избежание circular import
 
-    if _menu_msg_id is None or _bot is None:
+    menu_id = await _get_menu_msg_id()
+    if menu_id is None or _bot is None:
         return
 
     chat_id = trading_settings.notification_chat_id
@@ -61,7 +83,7 @@ async def _refresh_menu() -> None:
 
     # Удаляем старое меню
     try:
-        await _bot.delete_message(chat_id=chat_id, message_id=_menu_msg_id)
+        await _bot.delete_message(chat_id=chat_id, message_id=menu_id)
     except Exception:
         pass  # сообщение уже удалено или недоступно
 
@@ -73,7 +95,7 @@ async def _refresh_menu() -> None:
             reply_markup=main_menu(),
             parse_mode="HTML",
         )
-        set_menu_message(msg.message_id)
+        await set_menu_message(msg.message_id)
     except Exception as e:
         logger.error("Ошибка обновления меню после уведомления", error=str(e))
 

@@ -22,7 +22,7 @@ _WELCOME = (
 async def cmd_start(message: Message) -> None:
     """Ответить на /start главным меню."""
     msg = await message.answer(_WELCOME, reply_markup=main_menu(), parse_mode="HTML")
-    set_menu_message(msg.message_id)
+    await set_menu_message(msg.message_id)
 
 
 @router.callback_query(lambda c: c.data == "menu:main")
