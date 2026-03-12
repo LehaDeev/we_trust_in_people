@@ -46,19 +46,43 @@ class RetrainScheduler:
             timezone=retrain_settings.timezone,
         )
 
-        last_retrain_date: datetime | None = None
         while True:
-            await self._wait_until_next_run(last_retrain_date)
+            await self._wait_until_next_run()
             await self._retrain()
-            tz = zoneinfo.ZoneInfo(retrain_settings.timezone)
-            last_retrain_date = datetime.now(tz).date()
 
-    async def _wait_until_next_run(self, last_retrain_date=None) -> None:
+    def _already_trained_today(self) -> bool:
+        """Проверить по last_results.json — было ли обучение сегодня (в часовом поясе RETRAIN_TIMEZONE).
+
+        Работает корректно даже после перезапуска бота: читает файл с диска.
+        """
+        results_path = Path("ml/weights/last_results.json")
+        if not results_path.exists():
+            return False
+        try:
+            with open(results_path) as f:
+                data = json.load(f)
+            trained_at_str: str = data.get("trained_at", "")
+            if not trained_at_str:
+                return False
+            trained_at = datetime.fromisoformat(trained_at_str)
+            tz = zoneinfo.ZoneInfo(retrain_settings.timezone)
+            # trained_at может быть naive (UTC) или aware — приводим к tz
+            if trained_at.tzinfo is None:
+                from datetime import timezone as _tz
+                trained_at = trained_at.replace(tzinfo=_tz.utc)
+            trained_local = trained_at.astimezone(tz)
+            today_local = datetime.now(tz).date()
+            return trained_local.date() == today_local
+        except Exception:
+            return False
+
+    async def _wait_until_next_run(self) -> None:
         """Рассчитать время до следующего запуска и переждать его.
 
         Если бот запустился после RETRAIN_HOUR, но в пределах RETRAIN_CATCHUP_HOURS —
         запускает дообучение немедленно (наверстывание пропущенного окна).
-        Повторный catchup в рамках одного дня не выполняется.
+        Пропускает catchup если last_results.json показывает что обучение уже было сегодня
+        (защита от повторного запуска после перезапуска бота).
         """
         tz = zoneinfo.ZoneInfo(retrain_settings.timezone)
         now = datetime.now(tz)
@@ -71,11 +95,10 @@ class RetrainScheduler:
 
         # Наверстывание: если плановое время уже прошло сегодня,
         # но не более чем RETRAIN_CATCHUP_HOURS часов назад — запустить сразу.
-        # Пропускаем если уже обучались сегодня (защита от повторного запуска в цикле).
+        # Пропускаем если уже обучались сегодня (проверяем по файлу — работает после перезапуска).
         missed_seconds = (now - scheduled_today).total_seconds()
         catchup_window = retrain_settings.catchup_hours * 3600
-        already_ran_today = last_retrain_date is not None and last_retrain_date == now.date()
-        if 0 < missed_seconds <= catchup_window and not already_ran_today:
+        if 0 < missed_seconds <= catchup_window and not self._already_trained_today():
             logger.info(
                 "Пропущенное дообучение: запуск немедленно (catchup)",
                 scheduled_at=scheduled_today.strftime("%Y-%m-%d %H:%M %Z"),
