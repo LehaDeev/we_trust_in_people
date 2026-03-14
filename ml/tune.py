@@ -3,8 +3,8 @@
 
 Для каждой модели создаётся отдельное Optuna-исследование (study).
 Оценка производится через кросс-валидацию TimeSeriesSplit(n_splits=ML_N_SPLITS)
-с метрикой F1(BUY, SELL) — среднее F1 только по торговым сигналам (HOLD исключён).
-HOLD тривиален для предсказания и не влияет на P&L, поэтому не учитывается в HPO.
+с метрикой средний P&L на сделку (с учётом SL/TP и комиссии) — напрямую отражает
+торговую прибыльность модели. HOLD-сигналы не создают сделок и не влияют на метрику.
 
 Лучшие параметры сохраняются в ml/weights/best_params_{model}_{version}.json.
 """
@@ -19,12 +19,11 @@ import pandas as pd
 import xgboost as xgb
 from sklearn.ensemble import ExtraTreesClassifier
 from sklearn.svm import SVC
-from sklearn.metrics import f1_score
 from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
-from config.settings import ml_settings
+from config.settings import ml_settings, trading_settings
 from utils.logger import logger
 
 # Подавляем стандартный вывод Optuna — используем собственный прогресс
@@ -59,39 +58,103 @@ def _make_progress_callback(n_trials: int, label: str):
     return callback
 
 
-# ── Вспомогательная функция кросс-валидации ─────────────────────────────────
+# ── P&L-симулятор и CV-оценка ────────────────────────────────────────────────
 
-def _cv_f1_score(
+def _simulate_pnl(
+    y_pred: np.ndarray,
+    close_window: np.ndarray,
+    commission_pct: float,
+    sl_pct: float,
+    tp_pct: float,
+    lookahead: int,
+) -> float:
+    """
+    Симулировать P&L на выборке: одна позиция за раз, выход по SL/TP или через lookahead.
+
+    Аргументы:
+        y_pred:       предсказанные классы (0=SELL, 1=HOLD, 2=BUY).
+        close_window: матрица цен (N, lookahead+1), close_window[i,j] = close[t_i + j].
+        commission_pct: комиссия брокера (доля, например 0.003 = 0.3%).
+        sl_pct:       стоп-лосс от цены входа (доля, 0.03 = 3%).
+        tp_pct:       тейк-профит от цены входа (доля, 0.05 = 5%).
+        lookahead:    максимальное число свечей до выхода.
+
+    Возвращает:
+        Средний чистый P&L на сделку (доля). 0.0 если сделок не было.
+    """
+    pnl_list: list[float] = []
+    next_available = 0  # ближайший бар для открытия следующей позиции
+
+    for i in range(len(y_pred)):
+        if i < next_available:
+            continue
+        if int(y_pred[i]) != 2:  # только BUY открывает позицию
+            continue
+
+        entry = float(close_window[i, 0])
+        if entry <= 0.0:
+            continue
+
+        sl_price = entry * (1.0 - sl_pct)
+        tp_price = entry * (1.0 + tp_pct)
+        exit_price = float(close_window[i, lookahead])  # выход по умолчанию
+
+        # Проверяем SL/TP по промежуточным close-ценам
+        for j in range(1, lookahead + 1):
+            c = float(close_window[i, j])
+            if c <= sl_price:
+                exit_price = sl_price
+                break
+            if c >= tp_price:
+                exit_price = tp_price
+                break
+
+        net_pnl = (exit_price - entry) / entry - 2.0 * commission_pct
+        pnl_list.append(net_pnl)
+        next_available = i + lookahead  # позиция занята на lookahead баров
+
+    return float(np.mean(pnl_list)) if pnl_list else 0.0
+
+
+def _cv_pnl_score(
     model: Any,
     X: pd.DataFrame,
     y: pd.Series,
+    close_window: np.ndarray,
     cv: TimeSeriesSplit,
 ) -> float:
     """
-    Вычислить среднее f1_macro по всем фолдам TimeSeriesSplit.
+    Кросс-валидация с P&L-метрикой: средний чистый P&L на сделку по всем фолдам.
 
     Аргументы:
-        model: sklearn-совместимый классификатор с fit/predict.
-        X:     DataFrame признаков.
-        y:     Series меток.
-        cv:    экземпляр TimeSeriesSplit.
+        model:        sklearn-совместимый классификатор.
+        X:            DataFrame признаков.
+        y:            Series меток.
+        close_window: матрица цен (N, lookahead+1), выровненная с X/y.
+        cv:           экземпляр TimeSeriesSplit.
 
     Возвращает:
-        Среднее значение f1_macro по всем фолдам.
+        Средний P&L по фолдам (доля от вложений).
     """
     scores: list[float] = []
 
     for train_idx, val_idx in cv.split(X):
         X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-        y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+        y_train = y.iloc[train_idx]
+        y_pred = model.fit(X_train, y_train).predict(X_val)
+        cw_val = close_window[val_idx]
 
-        model.fit(X_train, y_train)
-        y_pred = model.predict(X_val)
-        # labels=[0,2]: оцениваем только SELL(0) и BUY(2) — торговые сигналы.
-        # HOLD(1) игнорируется: "ничего не делать" тривиально и не влияет на P&L.
-        scores.append(f1_score(y_val, y_pred, labels=[0, 2], average="macro", zero_division=0))
+        pnl = _simulate_pnl(
+            y_pred=y_pred,
+            close_window=cw_val,
+            commission_pct=trading_settings.broker_commission_pct,
+            sl_pct=trading_settings.stop_loss_pct,
+            tp_pct=trading_settings.take_profit_pct,
+            lookahead=ml_settings.lookahead,
+        )
+        scores.append(pnl)
 
-    return float(np.mean(scores))
+    return float(np.mean(scores)) if scores else 0.0
 
 
 # ── LightGBM ─────────────────────────────────────────────────────────────────
@@ -99,6 +162,7 @@ def _cv_f1_score(
 def tune_lgbm(
     X: pd.DataFrame,
     y: pd.Series,
+    close_window: np.ndarray,
     n_trials: int | None = None,
     version: str | None = None,
 ) -> dict:
@@ -130,13 +194,11 @@ def tune_lgbm(
             "min_child_samples": trial.suggest_int("min_child_samples", 10, 50),
             "random_state": ml_settings.random_state,
             "verbose": -1,
-            "n_jobs": -1,  # использовать все ядра CPU при каждом трайле
-            # Балансировка классов: HOLD доминирует (60–80%), без этого модель
-            # выучивает "всегда HOLD" и F1_macro падает к случайному уровню ~0.33
+            "n_jobs": -1,
             "class_weight": "balanced",
         }
         model = Pipeline([("scaler", StandardScaler()), ("model", lgb.LGBMClassifier(**params))])
-        return _cv_f1_score(model, X, y, cv)
+        return _cv_pnl_score(model, X, y, close_window, cv)
 
     study = optuna.create_study(direction="maximize")
     study.optimize(
@@ -238,6 +300,7 @@ def tune_xgboost(
 def tune_extra_trees(
     X: pd.DataFrame,
     y: pd.Series,
+    close_window: np.ndarray,
     n_trials: int | None = None,
     version: str | None = None,
 ) -> dict:
@@ -273,7 +336,7 @@ def tune_extra_trees(
             "class_weight": "balanced",
         }
         model = Pipeline([("scaler", StandardScaler()), ("model", ExtraTreesClassifier(**params))])
-        return _cv_f1_score(model, X, y, cv)
+        return _cv_pnl_score(model, X, y, close_window, cv)
 
     study = optuna.create_study(direction="maximize")
     study.optimize(

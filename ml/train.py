@@ -27,8 +27,7 @@ import numpy as np
 import optuna
 import pandas as pd
 from sklearn.ensemble import ExtraTreesClassifier, VotingClassifier
-from sklearn.metrics import f1_score
-from sklearn.model_selection import TimeSeriesSplit, cross_val_score
+from sklearn.model_selection import TimeSeriesSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from config.settings import data_settings, ml_settings
@@ -107,6 +106,7 @@ def _get_params(
     tune_fn,
     X: pd.DataFrame,
     y: pd.Series,
+    close_window: np.ndarray,
     force_tune: bool,
 ) -> dict:
     """
@@ -118,6 +118,7 @@ def _get_params(
         tune_fn:        функция подбора параметров из ml/tune.py.
         X:              DataFrame признаков.
         y:              Series меток.
+        close_window:   матрица цен (N, lookahead+1) для P&L-метрики Optuna.
         force_tune:     если True — игнорировать кеш и запустить Optuna заново.
 
     Возвращает:
@@ -129,7 +130,7 @@ def _get_params(
             return cached
 
     logger.info("Запуск Optuna HPO", model=model_name, ticker_version=ticker_version)
-    return tune_fn(X, y, version=ticker_version)
+    return tune_fn(X, y, close_window, version=ticker_version)
 
 
 # ── Сборка датасета для одного тикера ────────────────────────────────────────
@@ -137,16 +138,22 @@ def _get_params(
 def _build_ticker_dataset(
     group: pd.DataFrame,
     ticker: str,
-) -> tuple[pd.DataFrame, pd.Series]:
+) -> tuple[pd.DataFrame, pd.Series, np.ndarray]:
     """
-    Вычислить признаки и метки для одного тикера.
+    Вычислить признаки, метки и матрицу цен для одного тикера.
 
     Аргументы:
         group:  DataFrame свечей одного тикера [time, open, high, low, close, volume].
         ticker: тикер (только для логирования).
 
     Возвращает:
-        (X, y): DataFrame признаков и Series меток с согласованными индексами.
+        (X, y, close_window):
+            X            — DataFrame признаков,
+            y            — Series меток,
+            close_window — numpy array (N, lookahead+1):
+                           close_window[i, 0] = close[t_i] (цена входа),
+                           close_window[i, j] = close[t_i + j], j=1..lookahead.
+                           Используется для P&L-симуляции при HPO и оптимизации порога.
     """
     feat_df = compute_features(group)
     labels = create_labels(
@@ -165,7 +172,20 @@ def _build_ticker_dataset(
         sell=int((labels == 0).sum()),
     )
 
-    return feat_df[FEATURE_COLUMNS], labels
+    # Строим матрицу close-цен для P&L-симуляции.
+    # group.index — временной индекс всех свечей; feat_df.index — подмножество.
+    # create_labels гарантирует: для каждой строки в feat_df существуют
+    # ещё lookahead свечей вперёд в group (иначе строка была бы отброшена).
+    lookahead = ml_settings.lookahead
+    close_arr = group["close"].values.astype(float)
+    group_index_map: dict = {t: pos for pos, t in enumerate(group.index)}
+    entry_positions = np.array([group_index_map[t] for t in feat_df.index], dtype=int)
+    close_window = np.stack(
+        [close_arr[entry_positions + j] for j in range(lookahead + 1)],
+        axis=1,
+    )  # shape: (N, lookahead+1)
+
+    return feat_df[FEATURE_COLUMNS], labels, close_window
 
 
 # ── Оценка ансамбля ──────────────────────────────────────────────────────────
@@ -174,30 +194,25 @@ def _evaluate_ensemble(
     ensemble: VotingClassifier,
     X: pd.DataFrame,
     y: pd.Series,
+    close_window: np.ndarray,
     ticker: str,
 ) -> float:
     """
-    Оценить ансамбль через кросс-валидацию TimeSeriesSplit.
+    Оценить ансамбль через кросс-валидацию TimeSeriesSplit с P&L-метрикой.
 
     Возвращает:
-        Среднее f1_macro по всем фолдам.
+        Средний P&L на сделку по фолдам (доля от вложений).
+        Для отображения в боте конвертируется в псевдо-F1 (сдвиг + масштаб).
     """
-    from sklearn.metrics import f1_score as _f1
+    from ml.tune import _cv_pnl_score
     cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
-    scores = []
-    for train_idx, val_idx in cv.split(X):
-        ensemble.fit(X.iloc[train_idx], y.iloc[train_idx])
-        preds = ensemble.predict(X.iloc[val_idx])
-        # labels=[0,2]: только SELL(0) и BUY(2) — торговые сигналы, HOLD игнорируется
-        scores.append(_f1(y.iloc[val_idx], preds, labels=[0, 2], average="macro", zero_division=0))
-    mean_f1 = float(np.mean(scores))
+    mean_pnl = _cv_pnl_score(ensemble, X, y, close_window, cv)
     logger.info(
-        "Оценка ансамбля (CV)",
+        "Оценка ансамбля (CV P&L)",
         ticker=ticker,
-        f1_per_fold=[round(s, 4) for s in scores],
-        mean_f1=round(mean_f1, 4),
+        mean_pnl=round(mean_pnl, 5),
     )
-    return mean_f1
+    return mean_pnl
 
 
 # ── Feature importance ───────────────────────────────────────────────────────
@@ -276,34 +291,45 @@ def _optimize_threshold(
     ensemble: VotingClassifier,
     X_val: pd.DataFrame,
     y_val: np.ndarray,
+    close_window_val: np.ndarray,
     ticker: str,
 ) -> float:
     """
     Подобрать оптимальный порог уверенности для тикера через Optuna.
 
     Порог применяется в scheduler: если max(proba) < threshold → сигнал игнорируется.
-    Оптимизация на последних 20% данных максимизирует F1_macro с учётом порога.
+    Оптимизация на последних 20% данных максимизирует средний P&L на сделку.
 
     Аргументы:
-        ensemble: обученный ансамбль VotingClassifier.
-        X_val:    признаки валидационной выборки (последние 20% тикера).
-        y_val:    метки валидационной выборки.
-        ticker:   тикер инструмента (для логирования).
+        ensemble:         обученный ансамбль VotingClassifier.
+        X_val:            признаки валидационной выборки (последние 20% тикера).
+        y_val:            метки валидационной выборки.
+        close_window_val: матрица цен (N_val, lookahead+1) для P&L-симуляции.
+        ticker:           тикер инструмента (для логирования).
 
     Возвращает:
         Оптимальный порог уверенности в диапазоне [0.3, 0.9].
     """
+    from ml.tune import _simulate_pnl
+    from config.settings import trading_settings as ts
+
     proba = ensemble.predict_proba(X_val)  # shape: (n, 3)
 
     def objective(trial: optuna.Trial) -> float:
         threshold = trial.suggest_float("threshold", 0.3, 0.9)
-        # Если max(proba) < threshold — предсказываем HOLD (1)
         preds = np.where(
             proba.max(axis=1) >= threshold,
             proba.argmax(axis=1),
             1,  # HOLD
         )
-        return f1_score(y_val, preds, labels=[0, 2], average="macro", zero_division=0)
+        return _simulate_pnl(
+            y_pred=preds,
+            close_window=close_window_val,
+            commission_pct=ts.broker_commission_pct,
+            sl_pct=ts.stop_loss_pct,
+            tp_pct=ts.take_profit_pct,
+            lookahead=ml_settings.lookahead,
+        )
 
     study = optuna.create_study(direction="maximize")
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -314,7 +340,7 @@ def _optimize_threshold(
         "Порог уверенности оптимизирован",
         ticker=ticker,
         threshold=round(best, 4),
-        f1=round(study.best_value, 4),
+        pnl=round(study.best_value, 5),
     )
     return best
 
@@ -342,7 +368,7 @@ def _train_single_ticker(
     version = ml_settings.model_version
     ticker_version = f"{ticker}_{version}"
 
-    X, y = _build_ticker_dataset(group, ticker)
+    X, y, close_window = _build_ticker_dataset(group, ticker)
 
     if len(X) < ml_settings.n_splits * 2:
         raise RuntimeError(
@@ -356,7 +382,7 @@ def _train_single_ticker(
         if cached is not None:
             _print_cached(f"{model_name.upper()} HPO")
             return cached
-        return _get_params(model_name, ticker_version, tune_fn, X, y, force_tune)
+        return _get_params(model_name, ticker_version, tune_fn, X, y, close_window, force_tune)
 
     lgbm_params = _get_with_display("lgbm", tune_lgbm)
     et_params   = _get_with_display("et", tune_extra_trees)
@@ -435,7 +461,7 @@ def _train_single_ticker(
         cv_f1 = 0.0
     else:
         _print_step("CV оценка ансамбля...")
-        cv_f1 = _evaluate_ensemble(ensemble, X_final, y, ticker)
+        cv_f1 = _evaluate_ensemble(ensemble, X_final, y, close_window, ticker)
         _print_ok(f"F1={cv_f1:.4f}")
 
     _print_step("Финальное обучение ансамбля...")
@@ -451,8 +477,9 @@ def _train_single_ticker(
     _print_step("Оптимизация порога уверенности (Optuna)...")
     val_size = max(1, int(len(X_final) * 0.2))
     X_val = X_final.iloc[-val_size:]
-    y_val = y[-val_size:]
-    best_threshold = _optimize_threshold(ensemble, X_val, y_val, ticker)
+    y_val = y.values[-val_size:]
+    cw_val = close_window[-val_size:]
+    best_threshold = _optimize_threshold(ensemble, X_val, y_val, cw_val, ticker)
     _print_ok(f"threshold={best_threshold:.4f}")
 
     threshold_path = WEIGHTS_DIR / f"best_threshold_{ticker_version}.json"
