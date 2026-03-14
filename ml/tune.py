@@ -48,7 +48,7 @@ def _make_progress_callback(n_trials: int, label: str):
         bar = "#" * filled + "." * (_BAR_WIDTH - filled)
         best = study.best_value if study.best_trial else 0.0
         print(
-            f"\r    {label:<14} [{bar}] {done:>3}/{n_trials} | best F1={best:.4f}",
+            f"\r    {label:<14} [{bar}] {done:>3}/{n_trials} | best Sharpe={best:.4f}",
             end="",
             flush=True,
         )
@@ -67,28 +67,28 @@ def _simulate_pnl(
     sl_pct: float,
     tp_pct: float,
     lookahead: int,
-) -> float:
+) -> list[float]:
     """
-    Симулировать P&L на выборке: одна позиция за раз, выход по SL/TP или через lookahead.
+    Симулировать сделки: одна позиция за раз, выход по SL/TP или через lookahead.
 
     Аргументы:
-        y_pred:       предсказанные классы (0=SELL, 1=HOLD, 2=BUY).
-        close_window: матрица цен (N, lookahead+1), close_window[i,j] = close[t_i + j].
+        y_pred:         предсказанные классы (0=SELL, 1=HOLD, 2=BUY).
+        close_window:   матрица цен (N, lookahead+1), close_window[i,j] = close[t_i + j].
         commission_pct: комиссия брокера (доля, например 0.003 = 0.3%).
-        sl_pct:       стоп-лосс от цены входа (доля, 0.03 = 3%).
-        tp_pct:       тейк-профит от цены входа (доля, 0.05 = 5%).
-        lookahead:    максимальное число свечей до выхода.
+        sl_pct:         стоп-лосс от цены входа (доля, 0.03 = 3%).
+        tp_pct:         тейк-профит от цены входа (доля, 0.05 = 5%).
+        lookahead:      максимальное число свечей до выхода.
 
     Возвращает:
-        Средний чистый P&L на сделку (доля). 0.0 если сделок не было.
+        Список чистых P&L на каждую сделку (доля). Пустой список если сделок не было.
     """
     pnl_list: list[float] = []
-    next_available = 0  # ближайший бар для открытия следующей позиции
+    next_available = 0
 
     for i in range(len(y_pred)):
         if i < next_available:
             continue
-        if int(y_pred[i]) != 2:  # только BUY открывает позицию
+        if int(y_pred[i]) != 2:
             continue
 
         entry = float(close_window[i, 0])
@@ -97,9 +97,8 @@ def _simulate_pnl(
 
         sl_price = entry * (1.0 - sl_pct)
         tp_price = entry * (1.0 + tp_pct)
-        exit_price = float(close_window[i, lookahead])  # выход по умолчанию
+        exit_price = float(close_window[i, lookahead])
 
-        # Проверяем SL/TP по промежуточным close-ценам
         for j in range(1, lookahead + 1):
             c = float(close_window[i, j])
             if c <= sl_price:
@@ -109,11 +108,37 @@ def _simulate_pnl(
                 exit_price = tp_price
                 break
 
-        net_pnl = (exit_price - entry) / entry - 2.0 * commission_pct
-        pnl_list.append(net_pnl)
-        next_available = i + lookahead  # позиция занята на lookahead баров
+        pnl_list.append((exit_price - entry) / entry - 2.0 * commission_pct)
+        next_available = i + lookahead
 
-    return float(np.mean(pnl_list)) if pnl_list else 0.0
+    return pnl_list
+
+
+def _sharpe_score(pnl_list: list[float], min_trades: int) -> float:
+    """
+    Вычислить Sharpe ratio по списку P&L сделок.
+
+    Sharpe = mean(P&L) / std(P&L) — предпочитает стабильный доход перед
+    случайными всплесками с той же средней доходностью.
+
+    При недостатке сделок (< min_trades) возвращает 0.0 — штраф моделям,
+    которые почти не генерируют BUY-сигналы.
+
+    Аргументы:
+        pnl_list:   список P&L сделок.
+        min_trades: минимальное число сделок для расчёта (иначе 0.0).
+
+    Возвращает:
+        Sharpe ratio или 0.0.
+    """
+    if len(pnl_list) < min_trades:
+        return 0.0
+    arr = np.array(pnl_list)
+    std = float(np.std(arr))
+    if std < 1e-9:
+        # Все сделки одинаковы — Sharpe не определён, возвращаем mean
+        return float(np.mean(arr))
+    return float(np.mean(arr) / std)
 
 
 def _cv_pnl_score(
@@ -124,7 +149,10 @@ def _cv_pnl_score(
     cv: TimeSeriesSplit,
 ) -> float:
     """
-    Кросс-валидация с P&L-метрикой: средний чистый P&L на сделку по всем фолдам.
+    Кросс-валидация с Sharpe-метрикой: Sharpe по всем сделкам из всех фолдов.
+
+    Собираем все P&L из всех фолдов в один список — это стабильнее чем
+    усреднять Sharpe по фолдам (в каждом фолде мало сделок → шумно).
 
     Аргументы:
         model:        sklearn-совместимый классификатор.
@@ -134,27 +162,25 @@ def _cv_pnl_score(
         cv:           экземпляр TimeSeriesSplit.
 
     Возвращает:
-        Средний P&L по фолдам (доля от вложений).
+        Sharpe ratio по всем CV-сделкам. 0.0 если сделок меньше min_trades.
     """
-    scores: list[float] = []
+    all_pnl: list[float] = []
 
     for train_idx, val_idx in cv.split(X):
         X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
         y_train = y.iloc[train_idx]
         y_pred = model.fit(X_train, y_train).predict(X_val)
-        cw_val = close_window[val_idx]
 
-        pnl = _simulate_pnl(
+        all_pnl.extend(_simulate_pnl(
             y_pred=y_pred,
-            close_window=cw_val,
+            close_window=close_window[val_idx],
             commission_pct=trading_settings.broker_commission_pct,
             sl_pct=trading_settings.stop_loss_pct,
             tp_pct=trading_settings.take_profit_pct,
             lookahead=ml_settings.lookahead,
-        )
-        scores.append(pnl)
+        ))
 
-    return float(np.mean(scores)) if scores else 0.0
+    return _sharpe_score(all_pnl, min_trades=ml_settings.sharpe_min_trades)
 
 
 # ── LightGBM ─────────────────────────────────────────────────────────────────
@@ -219,7 +245,7 @@ def tune_lgbm(
 
     logger.info(
         "LightGBM tuning complete",
-        best_f1=round(study.best_value, 4),
+        best_sharpe=round(study.best_value, 4),
         best_params=best_params,
     )
 
@@ -351,7 +377,7 @@ def tune_extra_trees(
 
     logger.info(
         "ExtraTrees tuning complete",
-        best_f1=round(study.best_value, 4),
+        best_sharpe=round(study.best_value, 4),
         best_params=best_params,
     )
 

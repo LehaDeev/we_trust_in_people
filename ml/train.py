@@ -310,7 +310,7 @@ def _optimize_threshold(
     Возвращает:
         Оптимальный порог уверенности в диапазоне [0.3, 0.9].
     """
-    from ml.tune import _simulate_pnl
+    from ml.tune import _simulate_pnl, _sharpe_score
     from config.settings import trading_settings as ts
 
     proba = ensemble.predict_proba(X_val)  # shape: (n, 3)
@@ -322,7 +322,7 @@ def _optimize_threshold(
             proba.argmax(axis=1),
             1,  # HOLD
         )
-        return _simulate_pnl(
+        pnl_list = _simulate_pnl(
             y_pred=preds,
             close_window=close_window_val,
             commission_pct=ts.broker_commission_pct,
@@ -330,6 +330,7 @@ def _optimize_threshold(
             tp_pct=ts.take_profit_pct,
             lookahead=ml_settings.lookahead,
         )
+        return _sharpe_score(pnl_list, min_trades=ml_settings.sharpe_min_trades)
 
     study = optuna.create_study(direction="maximize")
     optuna.logging.set_verbosity(optuna.logging.WARNING)
@@ -340,7 +341,7 @@ def _optimize_threshold(
         "Порог уверенности оптимизирован",
         ticker=ticker,
         threshold=round(best, 4),
-        pnl=round(study.best_value, 5),
+        sharpe=round(study.best_value, 5),
     )
     return best
 

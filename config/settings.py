@@ -129,6 +129,10 @@ class MLSettings(BaseSettings):
     # Количество итераций Optuna для подбора порога уверенности per-ticker
     threshold_n_trials: int = Field(50, alias="ML_THRESHOLD_N_TRIALS")
 
+    # Минимальное число сделок для расчёта Sharpe ratio.
+    # Меньше — возвращает 0.0 (штраф моделям с редкими BUY-сигналами).
+    sharpe_min_trades: int = Field(10, alias="ML_SHARPE_MIN_TRADES")
+
     # Количество итераций Optuna для каждой модели
     optuna_trials_lgbm: int = Field(25, alias="ML_OPTUNA_TRIALS_LGBM")
     optuna_trials_xgb: int = Field(25, alias="ML_OPTUNA_TRIALS_XGB")

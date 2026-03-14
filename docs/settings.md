@@ -31,6 +31,7 @@
 | `ML_LOOKAHEAD` | Свечей вперёд для генерации меток | `8` |
 | `ML_THRESHOLD` | Порог доходности ±% для BUY/SELL | `0.007` |
 | `ML_THRESHOLD_N_TRIALS` | Итераций Optuna для подбора порога уверенности per-ticker | `50` |
+| `ML_SHARPE_MIN_TRADES` | Минимум сделок для расчёта Sharpe ratio (меньше — штраф 0.0) | `10` |
 | `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `50` |
 | `ML_OPTUNA_TRIALS_ET` | Итераций Optuna для ExtraTreesClassifier | `30` |
 | `ML_OPTUNA_TRIALS_SVC` | Итераций Optuna для SVC (Platt scaling — держать ≤ 20) | `20` |
