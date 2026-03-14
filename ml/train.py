@@ -33,7 +33,7 @@ from sklearn.preprocessing import StandardScaler
 from config.settings import data_settings, ml_settings
 from ml.dataset import load_all_tickers_from_csv, load_ticker_data, load_usdrub_data, merge_usdrub
 from ml.features import FEATURE_COLUMNS, compute_features
-from ml.labels import LABEL_NAMES, create_labels
+from ml.labels import LABEL_NAMES, create_labels_sim
 from ml.tune import tune_extra_trees, tune_lgbm
 from utils.logger import logger
 
@@ -155,13 +155,43 @@ def _build_ticker_dataset(
                            close_window[i, j] = close[t_i + j], j=1..lookahead.
                            Используется для P&L-симуляции при HPO и оптимизации порога.
     """
+    from config.settings import trading_settings as ts
+
     feat_df = compute_features(group)
-    labels = create_labels(
-        feat_df,
-        lookahead=ml_settings.lookahead,
-        threshold=ml_settings.threshold,
+
+    # Строим матрицу close-цен: close_window[i, j] = close[t_i + j], j=0..lookahead.
+    # Сначала отфильтровываем строки, для которых lookahead свечей вперёд недоступны
+    # (последние lookahead строк feat_df), — иначе close_arr[pos + lookahead] вышел бы за границу.
+    lookahead = ml_settings.lookahead
+    close_arr = group["close"].values.astype(float)
+    group_index_map: dict = {t: pos for pos, t in enumerate(group.index)}
+
+    valid_mask = np.array(
+        [group_index_map[t] + lookahead < len(group) for t in feat_df.index],
+        dtype=bool,
     )
-    feat_df = feat_df.loc[labels.index].copy()
+    feat_df = feat_df[valid_mask].copy()
+
+    entry_positions = np.array([group_index_map[t] for t in feat_df.index], dtype=int)
+    close_window = np.stack(
+        [close_arr[entry_positions + j] for j in range(lookahead + 1)],
+        axis=1,
+    )  # shape: (N, lookahead+1)
+
+    # Генерируем метки на основе SL/TP-симуляции — цель обучения совпадает с метрикой HPO.
+    # BUY  если чистый P&L > threshold (выгодный вход),
+    # SELL если чистый P&L < -threshold (невыгодный вход),
+    # HOLD иначе.
+    labels = create_labels_sim(
+        index=feat_df.index,
+        close_window=close_window,
+        lookahead=lookahead,
+        threshold=ml_settings.threshold,
+        commission_pct=ts.broker_commission_pct,
+        sl_pct=ts.stop_loss_pct,
+        tp_pct=ts.take_profit_pct,
+        tax_pct=ts.tax_pct,
+    )
 
     logger.info(
         "Датасет тикера собран",
@@ -171,19 +201,6 @@ def _build_ticker_dataset(
         hold=int((labels == 1).sum()),
         sell=int((labels == 0).sum()),
     )
-
-    # Строим матрицу close-цен для P&L-симуляции.
-    # group.index — временной индекс всех свечей; feat_df.index — подмножество.
-    # create_labels гарантирует: для каждой строки в feat_df существуют
-    # ещё lookahead свечей вперёд в group (иначе строка была бы отброшена).
-    lookahead = ml_settings.lookahead
-    close_arr = group["close"].values.astype(float)
-    group_index_map: dict = {t: pos for pos, t in enumerate(group.index)}
-    entry_positions = np.array([group_index_map[t] for t in feat_df.index], dtype=int)
-    close_window = np.stack(
-        [close_arr[entry_positions + j] for j in range(lookahead + 1)],
-        axis=1,
-    )  # shape: (N, lookahead+1)
 
     return feat_df[FEATURE_COLUMNS], labels, close_window
 
