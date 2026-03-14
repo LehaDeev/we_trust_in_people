@@ -48,7 +48,7 @@ def _make_progress_callback(n_trials: int, label: str):
         bar = "#" * filled + "." * (_BAR_WIDTH - filled)
         best = study.best_value if study.best_trial else 0.0
         print(
-            f"\r    {label:<14} [{bar}] {done:>3}/{n_trials} | best Sharpe={best:.4f}",
+            f"\r    {label:<14} [{bar}] {done:>3}/{n_trials} | best Sortino={best:.4f}",
             end="",
             flush=True,
         )
@@ -67,9 +67,16 @@ def _simulate_pnl(
     sl_pct: float,
     tp_pct: float,
     lookahead: int,
+    tax_pct: float = 0.0,
 ) -> list[float]:
     """
     Симулировать сделки: одна позиция за раз, выход по SL/TP или через lookahead.
+
+    P&L рассчитывается как чистый результат после комиссии и НДФЛ:
+        gross = (exit - entry) / entry
+        commission = 2 × commission_pct  (вход + выход)
+        tax = max(0, (gross - commission) × tax_pct)  — только на прибыль
+        net = gross - commission - tax
 
     Аргументы:
         y_pred:         предсказанные классы (0=SELL, 1=HOLD, 2=BUY).
@@ -78,6 +85,7 @@ def _simulate_pnl(
         sl_pct:         стоп-лосс от цены входа (доля, 0.03 = 3%).
         tp_pct:         тейк-профит от цены входа (доля, 0.05 = 5%).
         lookahead:      максимальное число свечей до выхода.
+        tax_pct:        ставка НДФЛ на прибыль (0.13 = 13%). 0.0 = не учитывать.
 
     Возвращает:
         Список чистых P&L на каждую сделку (доля). Пустой список если сделок не было.
@@ -108,37 +116,47 @@ def _simulate_pnl(
                 exit_price = tp_price
                 break
 
-        pnl_list.append((exit_price - entry) / entry - 2.0 * commission_pct)
+        gross = (exit_price - entry) / entry
+        commission = 2.0 * commission_pct
+        tax = max(0.0, (gross - commission) * tax_pct)
+        pnl_list.append(gross - commission - tax)
         next_available = i + lookahead
 
     return pnl_list
 
 
-def _sharpe_score(pnl_list: list[float], min_trades: int) -> float:
+def _sortino_score(pnl_list: list[float], min_trades: int) -> float:
     """
-    Вычислить Sharpe ratio по списку P&L сделок.
+    Вычислить Sortino ratio по списку P&L сделок.
 
-    Sharpe = mean(P&L) / std(P&L) — предпочитает стабильный доход перед
-    случайными всплесками с той же средней доходностью.
+    Sortino = mean(P&L) / downside_std — в знаменателе только убыточные сделки.
+    В отличие от Sharpe не штрафует за высокую прибыль: случайный большой выигрыш
+    не снижает оценку. Для торговой системы с ограниченными потерями (SL) и
+    несимметричными выигрышами (TP) теоретически корректнее Sharpe.
 
     При недостатке сделок (< min_trades) возвращает 0.0 — штраф моделям,
     которые почти не генерируют BUY-сигналы.
+    При отсутствии убытков (все сделки прибыльны) возвращает mean(P&L).
 
     Аргументы:
         pnl_list:   список P&L сделок.
         min_trades: минимальное число сделок для расчёта (иначе 0.0).
 
     Возвращает:
-        Sharpe ratio или 0.0.
+        Sortino ratio или 0.0.
     """
     if len(pnl_list) < min_trades:
         return 0.0
     arr = np.array(pnl_list)
-    std = float(np.std(arr))
-    if std < 1e-9:
-        # Все сделки одинаковы — Sharpe не определён, возвращаем mean
-        return float(np.mean(arr))
-    return float(np.mean(arr) / std)
+    mean = float(np.mean(arr))
+    losses = arr[arr < 0.0]
+    if len(losses) == 0:
+        # Все сделки прибыльны — downside не определён, возвращаем mean
+        return mean
+    downside_std = float(np.std(losses))
+    if downside_std < 1e-9:
+        return mean
+    return mean / downside_std
 
 
 def _cv_pnl_score(
@@ -149,10 +167,11 @@ def _cv_pnl_score(
     cv: TimeSeriesSplit,
 ) -> float:
     """
-    Кросс-валидация с Sharpe-метрикой: Sharpe по всем сделкам из всех фолдов.
+    Кросс-валидация с Sortino-метрикой: Sortino по всем сделкам из всех фолдов.
 
     Собираем все P&L из всех фолдов в один список — это стабильнее чем
-    усреднять Sharpe по фолдам (в каждом фолде мало сделок → шумно).
+    усреднять Sortino по фолдам (в каждом фолде мало сделок → шумно).
+    P&L включает комиссию и НДФЛ — точная реплика торговой логики scheduler.
 
     Аргументы:
         model:        sklearn-совместимый классификатор.
@@ -162,7 +181,7 @@ def _cv_pnl_score(
         cv:           экземпляр TimeSeriesSplit.
 
     Возвращает:
-        Sharpe ratio по всем CV-сделкам. 0.0 если сделок меньше min_trades.
+        Sortino ratio по всем CV-сделкам. 0.0 если сделок меньше min_trades.
     """
     all_pnl: list[float] = []
 
@@ -178,9 +197,10 @@ def _cv_pnl_score(
             sl_pct=trading_settings.stop_loss_pct,
             tp_pct=trading_settings.take_profit_pct,
             lookahead=ml_settings.lookahead,
+            tax_pct=trading_settings.tax_pct,
         ))
 
-    return _sharpe_score(all_pnl, min_trades=ml_settings.sharpe_min_trades)
+    return _sortino_score(all_pnl, min_trades=ml_settings.sharpe_min_trades)
 
 
 # ── LightGBM ─────────────────────────────────────────────────────────────────
@@ -245,7 +265,7 @@ def tune_lgbm(
 
     logger.info(
         "LightGBM tuning complete",
-        best_sharpe=round(study.best_value, 4),
+        best_sortino=round(study.best_value, 4),
         best_params=best_params,
     )
 
@@ -377,7 +397,7 @@ def tune_extra_trees(
 
     logger.info(
         "ExtraTrees tuning complete",
-        best_sharpe=round(study.best_value, 4),
+        best_sortino=round(study.best_value, 4),
         best_params=best_params,
     )
 
