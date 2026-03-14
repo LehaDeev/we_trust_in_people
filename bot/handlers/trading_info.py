@@ -17,7 +17,7 @@ from aiogram.types import CallbackQuery
 from sqlalchemy import select
 
 from bot.keyboards import back_to_trading
-from config.settings import trading_settings
+from config.settings import ml_settings, trading_settings
 from db import trade_repo
 from db.database import get_session
 from db.models import Asset
@@ -266,9 +266,19 @@ def _ml_nightly_status(trained_msk: datetime, force_tune: bool) -> str:
     return f"⚠️ Нет  (последнее {trained_msk.strftime('%d.%m %H:%M')} МСК, {hours_ago:.0f}ч назад)"
 
 
+def _load_ticker_threshold(ticker: str) -> str:
+    """Загрузить порог уверенности тикера из файла весов. Возвращает строку вида '0.62'."""
+    path = _RESULTS_PATH.parent / f"best_threshold_{ticker}_{ml_settings.model_version}.json"
+    try:
+        with open(path) as f:
+            return f"{json.load(f)['threshold']:.2f}"
+    except Exception:
+        return "—"
+
+
 @router.callback_query(lambda c: c.data == "trading:ml_status")
 async def cb_ml_status(callback: CallbackQuery) -> None:
-    """Показать статус ML-моделей: дата обучения, ночное обучение, F1 по тикерам."""
+    """Показать статус ML-моделей: дата обучения, Sortino и порог уверенности по тикерам."""
     await callback.answer("⏳ Загружаю данные моделей...")
 
     if not _RESULTS_PATH.exists():
@@ -288,33 +298,36 @@ async def cb_ml_status(callback: CallbackQuery) -> None:
             trained_at = trained_at.replace(tzinfo=zoneinfo.ZoneInfo("UTC"))
         trained_msk = trained_at.astimezone(_RETRAIN_TZ)
         force_tune: bool = data["force_tune"]
-        f1_scores: dict[str, float] = data["f1_scores"]
+        # Поддержка старого формата (f1_scores) и нового (sortino_scores)
+        sortino_scores: dict[str, float] = data.get("sortino_scores") or data.get("f1_scores", {})
         failed: list[str] = data.get("failed", [])
 
         # Загружаем предыдущие результаты для сравнения дельты
         prev_path = _RESULTS_PATH.parent / "last_results_prev.json"
-        prev_f1: dict[str, float] = {}
+        prev_scores: dict[str, float] = {}
         if prev_path.exists():
             try:
                 with open(prev_path) as pf:
-                    prev_f1 = json.load(pf).get("f1_scores", {})
+                    prev_data = json.load(pf)
+                prev_scores = prev_data.get("sortino_scores") or prev_data.get("f1_scores", {})
             except Exception:
                 pass
 
-        avg = sum(f1_scores.values()) / len(f1_scores) if f1_scores else 0.0
-        prev_avg = sum(prev_f1.values()) / len(prev_f1) if prev_f1 else None
+        avg = sum(sortino_scores.values()) / len(sortino_scores) if sortino_scores else 0.0
+        prev_avg = sum(prev_scores.values()) / len(prev_scores) if prev_scores else None
 
         def _delta(ticker: str, cur: float) -> str:
-            if ticker not in prev_f1:
+            if ticker not in prev_scores:
                 return ""
-            d = cur - prev_f1[ticker]
+            d = cur - prev_scores[ticker]
             if abs(d) < 0.0001:
                 return " (=)"
             return f" ({d:+.4f})"
 
-        f1_lines = "\n".join(
-            f"  {ticker:<6} {f1:.4f}{_delta(ticker, f1)}"
-            for ticker, f1 in sorted(f1_scores.items())
+        # Строки: тикер | Sortino | порог | дельта
+        score_lines = "\n".join(
+            f"  {ticker:<6} {score:.4f}  thr={_load_ticker_threshold(ticker)}{_delta(ticker, score)}"
+            for ticker, score in sorted(sortino_scores.items())
         )
         avg_delta = ""
         if prev_avg is not None:
@@ -327,7 +340,8 @@ async def cb_ml_status(callback: CallbackQuery) -> None:
             f"Последнее обучение:  <b>{trained_msk.strftime('%d.%m.%Y %H:%M')} МСК</b>\n"
             f"Ночное сегодня:      <b>{_ml_nightly_status(trained_msk, force_tune)}</b>\n"
             f"Optuna (force_tune): <b>{'Да' if force_tune else 'Нет'}</b>\n\n"
-            f"<b>F1 по тикерам:</b>\n<code>{f1_lines}\n{'─'*18}\n  {'Среднее':<6} {avg:.4f}{avg_delta}</code>"
+            f"<b>Sortino / порог по тикерам:</b>\n"
+            f"<code>{score_lines}\n{'─'*28}\n  {'Среднее':<6} {avg:.4f}{avg_delta}</code>"
             f"{failed_str}"
         )
     except Exception as e:

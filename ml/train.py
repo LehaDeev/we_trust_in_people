@@ -550,7 +550,7 @@ async def train_model(
     tickers_list = data_settings.tickers
     total = len(tickers_list)
     results: dict[str, Path] = {}
-    f1_scores: dict[str, float] = {}
+    sortino_scores: dict[str, float] = {}
 
     if data_dir is not None:
         # Режим CSV (Colab): загружаем всё сразу — файлы уже на диске
@@ -598,9 +598,9 @@ async def train_model(
         _print_ticker_header(ticker, i, total, len(group))
         logger.info("Обучение модели", ticker=ticker)
         try:
-            path, cv_f1 = _train_single_ticker(ticker, group, force_tune, skip_cv=skip_cv)
+            path, cv_sortino = _train_single_ticker(ticker, group, force_tune, skip_cv=skip_cv)
             results[ticker] = path
-            f1_scores[ticker] = round(cv_f1, 4)
+            sortino_scores[ticker] = round(cv_sortino, 4)
         except Exception as e:
             logger.error("Ошибка обучения тикера", ticker=ticker, error=str(e))
             print(f"  x Error: {e}", flush=True)
@@ -618,15 +618,15 @@ async def train_model(
     if results_path.exists():
         import shutil
         shutil.copy2(results_path, prev_path)
-    # При skip_cv F1 не вычислялся — берём сохранённые значения из предыдущего обучения
+    # При skip_cv Sortino не вычислялся — берём сохранённые значения из предыдущего обучения
     if skip_cv and prev_path.exists():
         try:
             with open(prev_path) as f_prev:
                 prev_data = json.load(f_prev)
-            prev_f1 = prev_data.get("f1_scores", {})
-            for ticker in f1_scores:
-                if f1_scores[ticker] == 0.0 and ticker in prev_f1:
-                    f1_scores[ticker] = prev_f1[ticker]
+            prev_sortino = prev_data.get("sortino_scores", {})
+            for ticker in sortino_scores:
+                if sortino_scores[ticker] == 0.0 and ticker in prev_sortino:
+                    sortino_scores[ticker] = prev_sortino[ticker]
         except Exception:
             pass
     with open(results_path, "w") as f:
@@ -635,7 +635,7 @@ async def train_model(
                 "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "force_tune": force_tune,
                 "skip_cv": skip_cv,
-                "f1_scores": f1_scores,
+                "sortino_scores": sortino_scores,
                 "failed": failed,
             },
             f,
