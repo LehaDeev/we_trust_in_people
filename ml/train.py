@@ -182,8 +182,14 @@ def _evaluate_ensemble(
     Возвращает:
         Среднее f1_macro по всем фолдам.
     """
+    from sklearn.metrics import f1_score as _f1
     cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
-    scores = cross_val_score(ensemble, X, y, cv=cv, scoring="f1_macro", n_jobs=1)
+    scores = []
+    for train_idx, val_idx in cv.split(X):
+        ensemble.fit(X.iloc[train_idx], y.iloc[train_idx])
+        preds = ensemble.predict(X.iloc[val_idx])
+        # labels=[0,2]: только SELL(0) и BUY(2) — торговые сигналы, HOLD игнорируется
+        scores.append(_f1(y.iloc[val_idx], preds, labels=[0, 2], average="macro", zero_division=0))
     mean_f1 = float(np.mean(scores))
     logger.info(
         "Оценка ансамбля (CV)",
@@ -297,7 +303,7 @@ def _optimize_threshold(
             proba.argmax(axis=1),
             1,  # HOLD
         )
-        return f1_score(y_val, preds, average="macro", zero_division=0)
+        return f1_score(y_val, preds, labels=[0, 2], average="macro", zero_division=0)
 
     study = optuna.create_study(direction="maximize")
     optuna.logging.set_verbosity(optuna.logging.WARNING)

@@ -3,7 +3,8 @@
 
 Для каждой модели создаётся отдельное Optuna-исследование (study).
 Оценка производится через кросс-валидацию TimeSeriesSplit(n_splits=ML_N_SPLITS)
-с метрикой f1_macro — корректно учитывает дисбаланс классов HOLD/BUY/SELL.
+с метрикой F1(BUY, SELL) — среднее F1 только по торговым сигналам (HOLD исключён).
+HOLD тривиален для предсказания и не влияет на P&L, поэтому не учитывается в HPO.
 
 Лучшие параметры сохраняются в ml/weights/best_params_{model}_{version}.json.
 """
@@ -86,7 +87,9 @@ def _cv_f1_score(
 
         model.fit(X_train, y_train)
         y_pred = model.predict(X_val)
-        scores.append(f1_score(y_val, y_pred, average="macro", zero_division=0))
+        # labels=[0,2]: оцениваем только SELL(0) и BUY(2) — торговые сигналы.
+        # HOLD(1) игнорируется: "ничего не делать" тривиально и не влияет на P&L.
+        scores.append(f1_score(y_val, y_pred, labels=[0, 2], average="macro", zero_division=0))
 
     return float(np.mean(scores))
 
