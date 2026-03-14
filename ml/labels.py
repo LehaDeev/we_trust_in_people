@@ -83,9 +83,9 @@ def create_labels_sim(
     выход по первому достижению SL или TP в пределах lookahead свечей, иначе close[t+lookahead].
     Чистый P&L (после комиссии и НДФЛ) определяет метку:
 
-        net_pnl > +threshold  →  BUY  (2) — выгодный вход
-        net_pnl < -threshold  →  SELL (0) — невыгодный вход
-        иначе                 →  HOLD (1) — неопределённый исход
+        gross > +threshold  →  BUY  (2) — цена выросла достаточно
+        gross < -threshold  →  SELL (0) — цена упала достаточно
+        иначе               →  HOLD (1) — движение в пределах порога
 
     Устраняет рассогласование между целью обучения (классификация по сырой доходности)
     и метрикой HPO (Sortino по симулированным сделкам): модель теперь учится предсказывать
@@ -130,9 +130,13 @@ def create_labels_sim(
     tax = np.maximum(0.0, (gross - commission) * tax_pct)
     net_pnl = gross - commission - tax
 
-    labels = np.ones(len(net_pnl), dtype=np.int8)  # HOLD по умолчанию
-    labels[net_pnl > threshold] = LABEL_MAP["BUY"]
-    labels[net_pnl < -threshold] = LABEL_MAP["SELL"]
+    # Метки определяем по gross (сырой доходности), а не по net_pnl.
+    # Комиссия и налог уже учтены в Sortino-метрике HPO — включать их в границы
+    # меток нельзя: commission=0.6% сдвигает SELL-зону вправо и любое падение
+    # даже на 0.1% становится SELL → дисбаланс классов (>60% SELL).
+    labels = np.ones(len(gross), dtype=np.int8)  # HOLD по умолчанию
+    labels[gross > threshold] = LABEL_MAP["BUY"]
+    labels[gross < -threshold] = LABEL_MAP["SELL"]
     # Нулевые/отрицательные entry — оставляем HOLD
     labels[entry <= 0.0] = LABEL_MAP["HOLD"]
 
