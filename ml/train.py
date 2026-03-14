@@ -314,8 +314,8 @@ def _optimize_threshold(
     """
     Подобрать оптимальный порог уверенности для тикера через Optuna.
 
-    Порог применяется в scheduler: если max(proba) < threshold → сигнал игнорируется.
-    Оптимизация на последних 20% данных максимизирует средний P&L на сделку.
+    Порог применяется в scheduler: если proba[BUY] < threshold → сигнал игнорируется.
+    Оптимизация на последних 20% данных максимизирует Sortino ratio сделок.
 
     Аргументы:
         ensemble:         обученный ансамбль VotingClassifier.
@@ -334,11 +334,10 @@ def _optimize_threshold(
 
     def objective(trial: optuna.Trial) -> float:
         threshold = trial.suggest_float("threshold", 0.3, 0.9)
-        preds = np.where(
-            proba.max(axis=1) >= threshold,
-            proba.argmax(axis=1),
-            1,  # HOLD
-        )
+        # Открываем BUY только если proba[BUY] >= threshold — точно совпадает
+        # с логикой scheduler. Не используем max(proba)/argmax, чтобы
+        # высокая уверенность в SELL или HOLD не влияла на порог BUY.
+        preds = np.where(proba[:, 2] >= threshold, 2, 1)  # 2=BUY, 1=HOLD
         pnl_list = _simulate_pnl(
             y_pred=preds,
             close_window=close_window_val,
