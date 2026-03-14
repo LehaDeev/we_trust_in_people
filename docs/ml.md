@@ -112,10 +112,14 @@ features_YDEX_v2.json  → ["hist_vol_20", "donchian_pct", ...]   # 37 приз�
 3. **Сбрасывает in-memory кеш** — следующий сигнал берётся из обновлённых весов
 4. **Отправляет уведомление в Telegram** — список обученных тикеров и ошибок
 
-**Почему `--skip-cv` при ночном запуске:** CV (5 фолдов × 2 модели) даёт в 6 раз больше
-нагрузки чем финальный фит, при этом не улучшает качество модели — гиперпараметры уже
-оптимизированы Optuna. На слабом сервере (2GB RAM) CV вызывал swap-thrashing.
-При необходимости измерить F1 — запустить вручную без флага `--skip-cv`.
+**Ночное обучение включает CV** (n_splits=3) — F1 обновляется каждую ночь.
+Swap-thrashing устранён снижением `n_splits` до 3 и `n_jobs=1` везде.
+
+**Оптимизация порога уверенности per-ticker:** после финального фита Optuna подбирает
+`confidence_threshold` индивидуально для каждого тикера (50 трайлов, последние 20% данных).
+Результат сохраняется в `ml/weights/best_threshold_{ticker}_{version}.json`.
+Scheduler загружает его вместо глобального `TRADING_CONFIDENCE_THRESHOLD`.
+Настраивается через `ML_THRESHOLD_N_TRIALS`.
 
 Настройки: `RETRAIN_ENABLED`, `RETRAIN_HOUR`, `RETRAIN_MINUTE`, `RETRAIN_TIMEZONE`, `RETRAIN_FORCE_TUNE` — см. [settings.md](settings.md#ночное-дообучение).
 

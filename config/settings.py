@@ -126,6 +126,9 @@ class MLSettings(BaseSettings):
     n_splits: int = Field(5, alias="ML_N_SPLITS")             # фолдов TimeSeriesSplit
     random_state: int = Field(42, alias="ML_RANDOM_STATE")
 
+    # Количество итераций Optuna для подбора порога уверенности per-ticker
+    threshold_n_trials: int = Field(50, alias="ML_THRESHOLD_N_TRIALS")
+
     # Количество итераций Optuna для каждой модели
     optuna_trials_lgbm: int = Field(25, alias="ML_OPTUNA_TRIALS_LGBM")
     optuna_trials_xgb: int = Field(25, alias="ML_OPTUNA_TRIALS_XGB")

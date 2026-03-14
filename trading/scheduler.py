@@ -19,9 +19,27 @@
     - Максимум TRADING_MAX_POSITIONS одновременно открытых позиций
 """
 import asyncio
+import json
 from datetime import time
 from decimal import Decimal
+from pathlib import Path
 from zoneinfo import ZoneInfo
+
+_WEIGHTS_DIR = Path(__file__).parent.parent / "ml" / "weights"
+
+
+def _ticker_threshold(ticker: str) -> float:
+    """Загрузить per-ticker порог уверенности из best_threshold_{ticker}_{version}.json.
+
+    При отсутствии файла возвращает глобальный TRADING_CONFIDENCE_THRESHOLD.
+    """
+    from config.settings import ml_settings
+    path = _WEIGHTS_DIR / f"best_threshold_{ticker}_{ml_settings.model_version}.json"
+    try:
+        with open(path) as f:
+            return json.load(f)["threshold"]
+    except Exception:
+        return trading_settings.confidence_threshold
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -509,12 +527,13 @@ class TradingScheduler:
                         logger.debug("Позиция уже открыта", ticker=ticker)
                         continue
 
-                    if confidence < trading_settings.confidence_threshold:
+                    ticker_threshold = _ticker_threshold(ticker)
+                    if confidence < ticker_threshold:
                         logger.debug(
                             "Уверенность ниже порога",
                             ticker=ticker,
                             confidence=confidence,
-                            threshold=trading_settings.confidence_threshold,
+                            threshold=ticker_threshold,
                         )
                         continue
 

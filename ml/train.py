@@ -24,8 +24,10 @@ from typing import Optional
 
 import lightgbm as lgb
 import numpy as np
+import optuna
 import pandas as pd
 from sklearn.ensemble import ExtraTreesClassifier, VotingClassifier
+from sklearn.metrics import f1_score
 from sklearn.model_selection import TimeSeriesSplit, cross_val_score
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
@@ -262,6 +264,55 @@ def _print_feature_importance(
         print(f"    {i:>2}. {feat:<25} {bar} {imp:.4f}", flush=True)
 
 
+# ── Оптимизация порога уверенности per-ticker ────────────────────────────────
+
+def _optimize_threshold(
+    ensemble: VotingClassifier,
+    X_val: pd.DataFrame,
+    y_val: np.ndarray,
+    ticker: str,
+) -> float:
+    """
+    Подобрать оптимальный порог уверенности для тикера через Optuna.
+
+    Порог применяется в scheduler: если max(proba) < threshold → сигнал игнорируется.
+    Оптимизация на последних 20% данных максимизирует F1_macro с учётом порога.
+
+    Аргументы:
+        ensemble: обученный ансамбль VotingClassifier.
+        X_val:    признаки валидационной выборки (последние 20% тикера).
+        y_val:    метки валидационной выборки.
+        ticker:   тикер инструмента (для логирования).
+
+    Возвращает:
+        Оптимальный порог уверенности в диапазоне [0.3, 0.9].
+    """
+    proba = ensemble.predict_proba(X_val)  # shape: (n, 3)
+
+    def objective(trial: optuna.Trial) -> float:
+        threshold = trial.suggest_float("threshold", 0.3, 0.9)
+        # Если max(proba) < threshold — предсказываем HOLD (1)
+        preds = np.where(
+            proba.max(axis=1) >= threshold,
+            proba.argmax(axis=1),
+            1,  # HOLD
+        )
+        return f1_score(y_val, preds, average="macro", zero_division=0)
+
+    study = optuna.create_study(direction="maximize")
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study.optimize(objective, n_trials=ml_settings.threshold_n_trials, show_progress_bar=False)
+
+    best = study.best_params["threshold"]
+    logger.info(
+        "Порог уверенности оптимизирован",
+        ticker=ticker,
+        threshold=round(best, 4),
+        f1=round(study.best_value, 4),
+    )
+    return best
+
+
 # ── Обучение одного тикера ───────────────────────────────────────────────────
 
 def _train_single_ticker(
@@ -387,6 +438,20 @@ def _train_single_ticker(
 
     if ml_settings.print_feature_importance:
         _print_feature_importance(ensemble, selected_features, ticker)
+
+    # ── Оптимизация порога уверенности per-ticker ─────────────────────────────
+    # Используем последние 20% данных как holdout для подбора threshold.
+    # Небольшая утечка допустима: порог — скаляр, не веса модели.
+    _print_step("Оптимизация порога уверенности (Optuna)...")
+    val_size = max(1, int(len(X_final) * 0.2))
+    X_val = X_final.iloc[-val_size:]
+    y_val = y[-val_size:]
+    best_threshold = _optimize_threshold(ensemble, X_val, y_val, ticker)
+    _print_ok(f"threshold={best_threshold:.4f}")
+
+    threshold_path = WEIGHTS_DIR / f"best_threshold_{ticker_version}.json"
+    with open(threshold_path, "w") as f:
+        json.dump({"ticker": ticker, "threshold": round(best_threshold, 4)}, f)
 
     ensemble_path = WEIGHTS_DIR / f"ensemble_{ticker_version}.pkl"
 
