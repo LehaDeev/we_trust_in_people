@@ -230,7 +230,7 @@ async def cb_status(callback: CallbackQuery) -> None:
         "ℹ️ <b>Параметры торговли</b>\n\n"
         f"💵 Свободно:       <b>{balance_str}</b>\n\n"
         f"Режим:             <b>{mode_str}</b>\n"
-        f"Уверенность:       <b>≥ {cfg.confidence_threshold * 100:.0f}%</b>\n"
+        f"Порог P(BUY):      <b>per-ticker</b> (fallback ≥ {cfg.confidence_threshold * 100:.0f}%)\n"
         f"Лотов на сделку:   <b>{cfg.lots_per_ticker}</b>\n"
         f"Макс. позиций:     <b>{cfg.max_open_positions}</b>\n"
         f"Интервал:          <b>{cfg.check_interval_seconds} сек</b>\n\n"
