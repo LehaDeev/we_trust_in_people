@@ -247,8 +247,8 @@ def _avg_importance(
         Словарь {feature_name: avg_importance}.
     """
     raw_per_model: list[dict[str, float]] = []
-    for fitted_pipeline in ensemble.estimators_:
-        model = fitted_pipeline.named_steps["model"]
+    for model in ensemble.estimators_:
+        # estimators_ содержит модели напрямую (Pipeline удалён — StandardScaler не нужен деревьям)
         if not hasattr(model, "feature_importances_"):
             continue
         raw = dict(zip(feature_names, model.feature_importances_.astype(float)))
@@ -329,6 +329,9 @@ def _optimize_threshold(
     from config.settings import trading_settings as ts
 
     proba = ensemble.predict_proba(X_val)  # shape: (n, 3)
+    # SELL-сигнал для выхода: argmax == 0 (SELL наиболее вероятен).
+    # Зеркалит реальную логику бота — выход по SELL-предсказанию, не по концу окна.
+    y_sell = (np.argmax(proba, axis=1) == 0).astype(np.int8)
 
     def objective(trial: optuna.Trial) -> float:
         threshold = trial.suggest_float("threshold", 0.3, 0.9)
@@ -344,6 +347,7 @@ def _optimize_threshold(
             tp_pct=ts.take_profit_pct,
             lookahead=ml_settings.lookahead,
             tax_pct=ts.tax_pct,
+            y_sell=y_sell,
         )
         return _sortino_score(pnl_list, min_trades=ml_settings.sharpe_min_trades)
 

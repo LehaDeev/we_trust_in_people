@@ -64,9 +64,16 @@ def _simulate_pnl(
     tp_pct: float,
     lookahead: int,
     tax_pct: float = 0.0,
+    y_sell: np.ndarray | None = None,
 ) -> list[float]:
     """
-    Симулировать сделки: одна позиция за раз, выход по SL/TP или через lookahead.
+    Симулировать сделки: одна позиция за раз, выход по SELL-сигналу / SL / TP / lookahead.
+
+    Порядок выхода по приоритету (соответствует реальной торговой логике бота):
+        1. SL — аварийный стоп (жёсткий, не перебивается SELL-сигналом)
+        2. TP — фиксация прибыли (жёсткий)
+        3. SELL-сигнал модели — основной выход при нормальной работе
+        4. конец окна lookahead — принудительный выход
 
     P&L рассчитывается как чистый результат после комиссии и НДФЛ:
         gross = (exit - entry) / entry
@@ -75,21 +82,24 @@ def _simulate_pnl(
         net = gross - commission - tax
 
     Аргументы:
-        y_pred:         предсказанные классы (0=SELL, 1=HOLD, 2=BUY).
+        y_pred:         предсказанные классы (0=SELL, 1=HOLD, 2=BUY). Используется для входа.
         close_window:   матрица цен (N, lookahead+1), close_window[i,j] = close[t_i + j].
         commission_pct: комиссия брокера (доля, например 0.003 = 0.3%).
         sl_pct:         стоп-лосс от цены входа (доля, 0.03 = 3%).
         tp_pct:         тейк-профит от цены входа (доля, 0.05 = 5%).
         lookahead:      максимальное число свечей до выхода.
         tax_pct:        ставка НДФЛ на прибыль (0.13 = 13%). 0.0 = не учитывать.
+        y_sell:         массив SELL-флагов (1 = SELL-сигнал, 0 = нет) той же длины что y_pred.
+                        None = не использовать SELL-выход (только SL/TP/lookahead).
 
     Возвращает:
         Список чистых P&L на каждую сделку (доля). Пустой список если сделок не было.
     """
     pnl_list: list[float] = []
     next_available = 0
+    n = len(y_pred)
 
-    for i in range(len(y_pred)):
+    for i in range(n):
         if i < next_available:
             continue
         if int(y_pred[i]) != 2:
@@ -105,11 +115,16 @@ def _simulate_pnl(
 
         for j in range(1, lookahead + 1):
             c = float(close_window[i, j])
+            # SL и TP — жёсткие стопы, имеют приоритет над SELL-сигналом
             if c <= sl_price:
                 exit_price = sl_price
                 break
             if c >= tp_price:
                 exit_price = tp_price
+                break
+            # SELL-сигнал модели: основной выход, если SL/TP не сработали
+            if y_sell is not None and i + j < n and y_sell[i + j]:
+                exit_price = c
                 break
 
         gross = (exit_price - entry) / entry
@@ -191,11 +206,15 @@ def _cv_pnl_score(
     for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X)):
         X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
         y_train = y.iloc[train_idx]
-        # predict_proba + порог 0.5 вместо argmax:
+        # predict_proba + порог 0.5 вместо argmax для входа в BUY:
         # argmax с balanced классами → BUY на ~33% баров (слишком агрессивно),
         # порог 0.5 → BUY только когда модель уверена сильнее случайного выбора.
         proba = model.fit(X_train, y_train).predict_proba(X_val)
         y_pred = np.where(proba[:, 2] >= 0.5, 2, 1)
+        # SELL-сигнал для выхода из позиции: argmax == 0 (SELL — наиболее вероятный класс).
+        # Это зеркалит реальную логику бота: scheduler выходит по SELL-сигналу модели,
+        # а не ждёт конца lookahead-окна. SL/TP остаются жёсткими стопами с приоритетом.
+        y_sell = (np.argmax(proba, axis=1) == 0).astype(np.int8)
 
         all_pnl.extend(_simulate_pnl(
             y_pred=y_pred,
@@ -205,6 +224,7 @@ def _cv_pnl_score(
             tp_pct=trading_settings.take_profit_pct,
             lookahead=ml_settings.lookahead,
             tax_pct=trading_settings.tax_pct,
+            y_sell=y_sell,
         ))
 
         # Pruning: репортим промежуточный Sortino после каждого фолда.
