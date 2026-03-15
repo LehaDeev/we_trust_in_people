@@ -61,14 +61,18 @@ def _format_signal(result: dict) -> str:
         pct_of_threshold = confidence / threshold * 100
     else:
         pct_of_threshold = 100.0 if confidence >= 0 else 0.0
-    gap = confidence - threshold
-    gap_sign = "+" if gap >= 0 else ""
-    gap_line = "Порог пройден" if passes_threshold else f"До порога: <b>{gap * 100:.2f}%</b>"
+    if passes_threshold:
+        strength_line = f"Сила сигнала: <b>{pct_of_threshold:.0f}%</b>  {threshold_mark}"
+        gap_line = "Порог пройден ✅"
+    else:
+        missing = 100 - pct_of_threshold
+        strength_line = f"Сила сигнала: <b>{pct_of_threshold:.0f}%</b> из 100  {threshold_mark}"
+        gap_line = f"Не хватает:  <b>{missing:.0f}%</b>"
 
     lines = [
         f"📈 <b>{ticker}</b>",
         f"Сигнал:   {emoji} <b>{signal}</b>",
-        f"Ранг:     <b>{pct_of_threshold:.0f}%</b> от порога  {threshold_mark}",
+        strength_line,
         gap_line,
         f"Объём:    <b>{volume_ratio:.2f}×</b> среднего{volume_suffix}",
     ]
