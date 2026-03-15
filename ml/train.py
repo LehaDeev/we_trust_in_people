@@ -492,7 +492,10 @@ def _train_single_ticker(
             "Соберите больше свечей."
         )
 
-    # Гиперпараметры: из кеша или через Optuna (с прогрессом в терминале)
+    # ── HPO на всех признаках ────────────────────────────────────────────────
+    # HPO работает на полном X (все 54 признака): деревья сами игнорируют слабые
+    # признаки через регуляризацию (min_split_gain, min_impurity_decrease, l2).
+    # Отбор признаков выполняется после — по importance уже обученных моделей.
     def _get_with_display(model_name: str, tune_fn) -> dict:
         cached = None if force_tune else _load_cached_params(model_name, ticker_version)
         if cached is not None:
@@ -504,12 +507,6 @@ def _train_single_ticker(
     et_params       = _get_with_display("et", tune_extra_trees)
     hist_gbm_params = _get_with_display("hist_gbm", tune_hist_gbm)
 
-    # RankEnsemble: z-score нормализация перед усреднением устраняет доминирование
-    # моделей с большим диапазоном предсказаний и обнуляет вклад константных моделей.
-    # Три принципиально разных objectives дают разные взгляды на распределение P&L:
-    #   LGBM     — quantile(alpha) → тюнируемый квантиль P&L
-    #   ExtraTrees — MSE → предсказывает среднее P&L
-    #   HistGBM  — MAE → предсказывает медиану P&L
     def _make_ensemble() -> RankEnsemble:
         return RankEnsemble(
             estimators=[
@@ -517,19 +514,15 @@ def _train_single_ticker(
                 ("et", ExtraTreesRegressor(**et_params)),
                 ("hist_gbm", HistGradientBoostingRegressor(**hist_gbm_params)),
             ],
-            n_jobs=1,  # для совместимости API; модели обучаются последовательно
+            n_jobs=1,
         )
 
     all_features = X.columns.tolist()
     threshold = ml_settings.feature_importance_threshold
 
-    # ── Проход 1: быстрый фит на всех признаках → отбор по порогу per-ticker ──
-    # Один фит (без CV) чтобы получить feature importance и отбросить слабые.
-    # Для каждого тикера свой порог отбора — разные признаки могут быть важны
-    # для банков (SBER), нефтяников (LKOH), IT-компаний (YDEX) и т.д.
-    # CV-оценка и финальный фит выполняются уже на отобранных признаках.
-    # Кеш признаков: если features_{ticker_version}.json уже есть и force_tune=False
-    # — пропускаем первый фит, загружаем готовый список.
+    # ── Проход 1: отбор признаков по importance обученных моделей ─────────────
+    # Зондовый ансамбль (с HPO-параметрами) обучается на всех 54 признаках →
+    # отбрасывает слабые → X_final. CV и финальный фит на X_final.
     features_path = WEIGHTS_DIR / f"features_{ticker_version}.json"
     if threshold > 0.0:
         cached_features: list[str] | None = None
@@ -537,7 +530,6 @@ def _train_single_ticker(
             try:
                 with open(features_path) as f:
                     cached_features = json.load(f)
-                # Проверяем что кешированные признаки — подмножество текущих
                 cached_features = [c for c in cached_features if c in all_features]
             except Exception:
                 cached_features = None
@@ -556,7 +548,6 @@ def _train_single_ticker(
             gc.collect()
         X_final = X[selected_features]
     else:
-        # Отбор отключён — берём все признаки
         selected_features = all_features
         X_final = X
 
