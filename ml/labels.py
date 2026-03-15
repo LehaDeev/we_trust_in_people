@@ -97,7 +97,7 @@ def create_labels_sim(
                         close_window[i, 0] = close[t_i] (цена входа),
                         close_window[i, j] = close[t_i + j], j=1..lookahead.
         lookahead:      максимальный горизонт удержания позиции (свечей).
-        threshold:      минимальный |net_pnl| для BUY/SELL (доля; 0.005 = 0.5%).
+        threshold:      минимальный |gross| для BUY/SELL (доля; 0.005 = 0.5%).
         commission_pct: комиссия брокера (доля за одну сторону; 0.003 = 0.3%).
         sl_pct:         стоп-лосс от цены входа (доля; 0.03 = 3%).
         tp_pct:         тейк-профит от цены входа (доля; 0.05 = 5%).
@@ -107,8 +107,16 @@ def create_labels_sim(
         pd.Series с метками (SELL=0, HOLD=1, BUY=2), индекс = index.
     """
     entry = close_window[:, 0]
-    sl_prices = entry * (1.0 - sl_pct)
-    tp_prices = entry * (1.0 + tp_pct)
+
+    # Цены триггера SL/TP рассчитаны как NET-цели — совпадают с adjusted_sl_price /
+    # adjusted_tp_price из trading/profitability.py:
+    #   SL: net_loss = sl_pct  → gross trigger = (1 + c - sl) / (1 - c)
+    #   TP: net_profit = tp_pct → gross trigger = ((1+c) + tp/(1-t)) / (1-c)
+    # Это обеспечивает согласованность меток с симуляцией HPO и реальной торговлей.
+    c = commission_pct
+    t = max(tax_pct, 1e-9)  # защита от деления на 0 при tax_pct=0
+    sl_prices = entry * (1.0 + c - sl_pct) / (1.0 - c)
+    tp_prices = entry * ((1.0 + c) + tp_pct / (1.0 - t)) / (1.0 - c)
 
     # По умолчанию выходим по цене закрытия через lookahead свечей
     exit_prices = close_window[:, lookahead].copy()
@@ -116,24 +124,20 @@ def create_labels_sim(
 
     # Ищем первое касание SL или TP внутри окна
     for j in range(1, lookahead + 1):
-        c = close_window[:, j]
-        hit_sl = still_open & (c <= sl_prices)
-        hit_tp = still_open & (c >= tp_prices)
+        prices_j = close_window[:, j]
+        hit_sl = still_open & (prices_j <= sl_prices)
+        hit_tp = still_open & (prices_j >= tp_prices)
         exit_prices[hit_sl] = sl_prices[hit_sl]
         exit_prices[hit_tp] = tp_prices[hit_tp]
         still_open &= ~(hit_sl | hit_tp)
 
-    # Чистый P&L = gross - commission - НДФЛ (только на прибыль)
-    with np.errstate(invalid="ignore", divide="ignore"):
-        gross = np.where(entry > 0.0, (exit_prices - entry) / entry, 0.0)
-    commission = 2.0 * commission_pct
-    tax = np.maximum(0.0, (gross - commission) * tax_pct)
-    net_pnl = gross - commission - tax
-
-    # Метки определяем по gross (сырой доходности), а не по net_pnl.
+    # Метки определяем по gross (сырой доходности).
     # Комиссия и налог уже учтены в Sortino-метрике HPO — включать их в границы
     # меток нельзя: commission=0.6% сдвигает SELL-зону вправо и любое падение
     # даже на 0.1% становится SELL → дисбаланс классов (>60% SELL).
+    with np.errstate(invalid="ignore", divide="ignore"):
+        gross = np.where(entry > 0.0, (exit_prices - entry) / entry, 0.0)
+
     labels = np.ones(len(gross), dtype=np.int8)  # HOLD по умолчанию
     labels[gross > threshold] = LABEL_MAP["BUY"]
     labels[gross < -threshold] = LABEL_MAP["SELL"]

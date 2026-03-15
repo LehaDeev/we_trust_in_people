@@ -109,8 +109,14 @@ def _simulate_pnl(
         if entry <= 0.0:
             continue
 
-        sl_price = entry * (1.0 - sl_pct)
-        tp_price = entry * (1.0 + tp_pct)
+        # Цены триггера рассчитаны как NET SL/TP — совпадают с adjusted_sl_price / adjusted_tp_price
+        # из trading/profitability.py. Это обеспечивает согласованность симуляции с реальной торговлей:
+        #   SL: выход при net_loss = sl_pct  → gross trigger ≈ sl_pct - 2×commission  (меньше sl_pct)
+        #   TP: выход при net_profit = tp_pct → gross trigger ≈ tp_pct + 2×commission + tax (больше tp_pct)
+        c = commission_pct
+        t = tax_pct
+        sl_price = entry * (1.0 + c - sl_pct) / (1.0 - c)
+        tp_price = entry * ((1.0 + c) + tp_pct / (max(1.0 - t, 1e-9))) / (1.0 - c)
         exit_price = float(close_window[i, lookahead])
 
         for j in range(1, lookahead + 1):
