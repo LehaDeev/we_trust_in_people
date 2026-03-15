@@ -6,7 +6,7 @@
     2. Вычисление признаков (TA-Lib индикаторы)
     3. Генерация меток по будущей доходности
     4. Подбор гиперпараметров через Optuna (с кешем best_params_*_{ticker}_{version}.json)
-    5. Обучение ансамбля VotingClassifier(soft) — LightGBM + ExtraTrees
+    5. Обучение ансамбля VotingRegressor(soft) — LightGBM + ExtraTrees
     6. Сохранение весов в ml/weights/ensemble_{ticker}_{version}.pkl
 
 Запуск:
@@ -26,12 +26,12 @@ import lightgbm as lgb
 import numpy as np
 import optuna
 import pandas as pd
-from sklearn.ensemble import ExtraTreesClassifier, VotingClassifier
+from sklearn.ensemble import ExtraTreesRegressor, VotingRegressor
 from sklearn.model_selection import TimeSeriesSplit
 from config.settings import data_settings, ml_settings
 from ml.dataset import load_all_tickers_from_csv, load_ticker_data, load_usdrub_data, merge_usdrub
 from ml.features import FEATURE_COLUMNS, compute_features
-from ml.labels import LABEL_NAMES, create_labels_sim
+from ml.labels import compute_pnl_targets
 from ml.tune import tune_extra_trees, tune_lgbm
 from utils.logger import logger
 
@@ -87,15 +87,20 @@ def _load_cached_params(model_name: str, ticker_version: str) -> dict | None:
         ticker_version: строка вида "{ticker}_{version}" (например, "SBER_v2").
 
     Возвращает:
-        Словарь параметров или None если кеша нет.
+        Словарь параметров или None если кеша нет или параметры устарели.
     """
     path = WEIGHTS_DIR / f"best_params_{model_name}_{ticker_version}.json"
-    if path.exists():
-        with open(path) as f:
-            params = json.load(f)
-        logger.info("Загружены кешированные параметры", model=model_name, path=str(path))
-        return params
-    return None
+    if not path.exists():
+        return None
+    with open(path) as f:
+        params = json.load(f)
+    # Валидация совместимости: старые classifier-параметры не подходят регрессору.
+    # При наличии "num_class" или "objective"="multiclass" — параметры устарели → переобучаем.
+    if model_name == "lgbm" and params.get("objective") != "regression_l1":
+        logger.info("Кеш LGBM устарел (classifier→regressor), переобучаем", path=str(path))
+        return None
+    logger.info("Загружены кешированные параметры", model=model_name, path=str(path))
+    return params
 
 
 def _get_params(
@@ -176,15 +181,13 @@ def _build_ticker_dataset(
         axis=1,
     )  # shape: (N, lookahead+1)
 
-    # Генерируем метки на основе SL/TP-симуляции — цель обучения совпадает с метрикой HPO.
-    # BUY  если чистый P&L > threshold (выгодный вход),
-    # SELL если чистый P&L < -threshold (невыгодный вход),
-    # HOLD иначе.
-    labels = create_labels_sim(
+    # Целевая переменная — непрерывный net P&L для регрессии.
+    # Регрессор предсказывает ожидаемый P&L каждого возможного входа (BUY here),
+    # что устраняет дискретизацию непрерывного P&L в 3 класса и проблему дисбаланса.
+    targets = compute_pnl_targets(
         index=feat_df.index,
         close_window=close_window,
         lookahead=lookahead,
-        threshold=ml_settings.threshold,
         commission_pct=ts.broker_commission_pct,
         sl_pct=ts.stop_loss_pct,
         tp_pct=ts.take_profit_pct,
@@ -194,19 +197,19 @@ def _build_ticker_dataset(
     logger.info(
         "Датасет тикера собран",
         ticker=ticker,
-        samples=len(labels),
-        buy=int((labels == 2).sum()),
-        hold=int((labels == 1).sum()),
-        sell=int((labels == 0).sum()),
+        samples=len(targets),
+        pnl_positive=int((targets > 0).sum()),
+        pnl_negative=int((targets < 0).sum()),
+        pnl_mean=round(float(targets.mean()), 5),
     )
 
-    return feat_df[FEATURE_COLUMNS], labels, close_window
+    return feat_df[FEATURE_COLUMNS], targets, close_window
 
 
 # ── Оценка ансамбля ──────────────────────────────────────────────────────────
 
 def _evaluate_ensemble(
-    ensemble: VotingClassifier,
+    ensemble: VotingRegressor,
     X: pd.DataFrame,
     y: pd.Series,
     close_window: np.ndarray,
@@ -233,7 +236,7 @@ def _evaluate_ensemble(
 # ── Feature importance ───────────────────────────────────────────────────────
 
 def _avg_importance(
-    ensemble: VotingClassifier,
+    ensemble: VotingRegressor,
     feature_names: list[str],
 ) -> dict[str, float]:
     """
@@ -265,7 +268,7 @@ def _avg_importance(
 
 
 def _select_by_threshold(
-    ensemble: VotingClassifier,
+    ensemble: VotingRegressor,
     feature_names: list[str],
     threshold: float,
 ) -> list[str]:
@@ -285,7 +288,7 @@ def _select_by_threshold(
 
 
 def _print_feature_importance(
-    ensemble: VotingClassifier,
+    ensemble: VotingRegressor,
     feature_names: list[str],
     ticker: str,
 ) -> None:
@@ -303,42 +306,40 @@ def _print_feature_importance(
 # ── Оптимизация порога уверенности per-ticker ────────────────────────────────
 
 def _optimize_threshold(
-    ensemble: VotingClassifier,
+    ensemble: VotingRegressor,
     X_val: pd.DataFrame,
     y_val: np.ndarray,
     close_window_val: np.ndarray,
     ticker: str,
 ) -> float:
     """
-    Подобрать оптимальный порог уверенности для тикера через Optuna.
+    Подобрать оптимальный порог входа в сделку для тикера через Optuna.
 
-    Порог применяется в scheduler: если proba[BUY] < threshold → сигнал игнорируется.
+    Порог применяется в scheduler: если predicted_pnl < threshold → BUY игнорируется.
     Оптимизация на последних 20% данных максимизирует Sortino ratio сделок.
 
     Аргументы:
-        ensemble:         обученный ансамбль VotingClassifier.
+        ensemble:         обученный ансамбль VotingRegressor.
         X_val:            признаки валидационной выборки (последние 20% тикера).
-        y_val:            метки валидационной выборки.
+        y_val:            целевые P&L (не используются — симуляция работает с close_window).
         close_window_val: матрица цен (N_val, lookahead+1) для P&L-симуляции.
         ticker:           тикер инструмента (для логирования).
 
     Возвращает:
-        Оптимальный порог уверенности в диапазоне [0.3, 0.9].
+        Оптимальный порог в пространстве предсказанного P&L (диапазон [0.0, 0.02]).
     """
     from ml.tune import _simulate_pnl, _sortino_score
     from config.settings import trading_settings as ts
 
-    proba = ensemble.predict_proba(X_val)  # shape: (n, 3)
-    # SELL-сигнал для выхода: argmax == 0 (SELL наиболее вероятен).
-    # Зеркалит реальную логику бота — выход по SELL-предсказанию, не по концу окна.
-    y_sell = (np.argmax(proba, axis=1) == 0).astype(np.int8)
+    # Регрессор предсказывает ожидаемый net P&L для каждого бара.
+    pnl_pred = ensemble.predict(X_val)
+    y_sell = (pnl_pred < 0).astype(np.int8)
 
     def objective(trial: optuna.Trial) -> float:
-        threshold = trial.suggest_float("threshold", 0.3, 0.9)
-        # Открываем BUY только если proba[BUY] >= threshold — точно совпадает
-        # с логикой scheduler. Не используем max(proba)/argmax, чтобы
-        # высокая уверенность в SELL или HOLD не влияла на порог BUY.
-        preds = np.where(proba[:, 2] >= threshold, 2, 1)  # 2=BUY, 1=HOLD
+        # Открываем BUY только если predicted_pnl >= threshold.
+        # 0.0 = входим при любом положительном прогнозе (break-even).
+        threshold = trial.suggest_float("threshold", 0.0, 0.02)
+        preds = np.where(pnl_pred >= threshold, 2, 1).astype(np.int8)
         pnl_list = _simulate_pnl(
             y_pred=preds,
             close_window=close_window_val,
@@ -351,8 +352,6 @@ def _optimize_threshold(
         )
         return _sortino_score(pnl_list, min_trades=ml_settings.sharpe_min_trades)
 
-    # Threshold — 1 непрерывный параметр: n_startup_trials=5 достаточно
-    # (дефолт 10 — избыточно для 1D), seed — воспроизводимость
     sampler = optuna.samplers.TPESampler(
         n_startup_trials=5,
         seed=ml_settings.random_state,
@@ -363,9 +362,9 @@ def _optimize_threshold(
 
     best = study.best_params["threshold"]
     logger.info(
-        "Порог уверенности оптимизирован",
+        "Порог входа оптимизирован",
         ticker=ticker,
-        threshold=round(best, 4),
+        threshold=round(best, 5),
         sortino=round(study.best_value, 5),
     )
     return best
@@ -414,26 +413,18 @@ def _train_single_ticker(
     et_params   = _get_with_display("et", tune_extra_trees)
 
     # Балансировка классов — фиксированный параметр, не из HPO-кеша.
-    # Без него модели выучивают "всегда HOLD" → F1_macro ≈ 0.33 (случайный уровень).
-    lgbm_params["class_weight"] = "balanced"
-    et_params["class_weight"]   = "balanced"
-
-    # VotingClassifier(voting='soft') усредняет предсказанные вероятности базовых моделей.
+    # VotingRegressor усредняет предсказания базовых регрессоров.
     # Два принципиально разных алгоритма:
-    #   LGBM       — градиентный бустинг деревьев
+    #   LGBM       — градиентный бустинг (regression_l1, устойчив к выбросам P&L)
     #   ExtraTrees — рандомизированные деревья (случайные пороги), низкая корреляция с LGBM
-    # SVC был исключён: его F1=0.3831 < F1 деревьев (~0.405), ансамбль стал хуже обеих моделей.
-    # StackingClassifier не подходит для временных рядов: его внутренний cv=StratifiedKFold
-    # перемешивает данные → утечка будущего в OOF → мета-модель деградирует на TimeSeriesSplit.
-    def _make_ensemble() -> VotingClassifier:
+    def _make_ensemble() -> VotingRegressor:
         # Оба алгоритма — деревья решений: StandardScaler не влияет на результат,
         # т.к. сплиты монотонны к масштабу признаков. Убрано для экономии вычислений.
-        return VotingClassifier(
+        return VotingRegressor(
             estimators=[
-                ("lgbm", lgb.LGBMClassifier(**lgbm_params)),
-                ("et", ExtraTreesClassifier(**et_params)),
+                ("lgbm", lgb.LGBMRegressor(**lgbm_params)),
+                ("et", ExtraTreesRegressor(**et_params)),
             ],
-            voting="soft",
             n_jobs=1,  # последовательный фит — меньше RAM на слабом сервере
         )
 

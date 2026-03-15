@@ -16,7 +16,7 @@ import lightgbm as lgb
 import numpy as np
 import optuna
 import pandas as pd
-from sklearn.ensemble import ExtraTreesClassifier
+from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.model_selection import TimeSeriesSplit
 
 from config.settings import ml_settings, trading_settings
@@ -210,9 +210,9 @@ def _cv_pnl_score(
     не досчитываются. Экономия: ~30% времени HPO на отброшенных trials.
 
     Аргументы:
-        model:        sklearn-совместимый классификатор.
+        model:        sklearn-совместимый регрессор.
         X:            DataFrame признаков.
-        y:            Series меток.
+        y:            Series целевых P&L значений (float).
         close_window: матрица цен (N, lookahead+1), выровненная с X/y.
         cv:           экземпляр TimeSeriesSplit.
         trial:        Optuna trial для pruning (None = без pruning).
@@ -225,15 +225,12 @@ def _cv_pnl_score(
     for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X)):
         X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
         y_train = y.iloc[train_idx]
-        # predict_proba + порог 0.5 вместо argmax для входа в BUY:
-        # argmax с balanced классами → BUY на ~33% баров (слишком агрессивно),
-        # порог 0.5 → BUY только когда модель уверена сильнее случайного выбора.
-        proba = model.fit(X_train, y_train).predict_proba(X_val)
-        y_pred = np.where(proba[:, 2] >= 0.5, 2, 1)
-        # SELL-сигнал для выхода из позиции: argmax == 0 (SELL — наиболее вероятный класс).
-        # Это зеркалит реальную логику бота: scheduler выходит по SELL-сигналу модели,
-        # а не ждёт конца lookahead-окна. SL/TP остаются жёсткими стопами с приоритетом.
-        y_sell = (np.argmax(proba, axis=1) == 0).astype(np.int8)
+        # Регрессор предсказывает ожидаемый net P&L для каждого бара.
+        # BUY  если предсказанный P&L >= 0 (ожидаем прибыль).
+        # SELL если предсказанный P&L  < 0 (ожидаем убыток → сигнал выхода).
+        pnl_pred = model.fit(X_train, y_train).predict(X_val)
+        y_pred = np.where(pnl_pred >= 0, 2, 1).astype(np.int8)
+        y_sell = (pnl_pred < 0).astype(np.int8)
 
         all_pnl.extend(_simulate_pnl(
             y_pred=y_pred,
@@ -268,11 +265,11 @@ def tune_lgbm(
     version: str | None = None,
 ) -> dict:
     """
-    Подобрать гиперпараметры LightGBM через Optuna.
+    Подобрать гиперпараметры LightGBM-регрессора через Optuna.
 
     Аргументы:
         X:        DataFrame признаков.
-        y:        Series меток (0, 1, 2).
+        y:        Series целевых P&L значений (float).
         n_trials: количество итераций (None = из ml_settings).
         version:  версия для имени файла (None = из ml_settings).
 
@@ -285,8 +282,9 @@ def tune_lgbm(
 
     def objective(trial: optuna.Trial) -> float:
         params = {
-            "objective": "multiclass",
-            "num_class": 3,
+            # regression_l1 (MAE) устойчивее к выбросам P&L (SL-хиты, TP-хиты),
+            # чем regression (MSE), которая штрафует большие отклонения квадратично.
+            "objective": "regression_l1",
             "num_leaves": trial.suggest_int("num_leaves", 15, 255),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "n_estimators": trial.suggest_int("n_estimators", 200, 1000),
@@ -296,16 +294,15 @@ def tune_lgbm(
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
             "min_child_samples": trial.suggest_int("min_child_samples", 10, 50),
             # Регуляризация — ключевые параметры для шумных финансовых данных
-            "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 1.0),       # L1: обнуляет слабые признаки
-            "reg_lambda": trial.suggest_float("reg_lambda", 0.0, 5.0),     # L2: сглаживает веса
-            "min_split_gain": trial.suggest_float("min_split_gain", 0.0, 0.5),  # минимальный прирост для разбиения
+            "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 1.0),
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.0, 5.0),
+            "min_split_gain": trial.suggest_float("min_split_gain", 0.0, 0.5),
             "random_state": ml_settings.random_state,
             "verbose": -1,
             "n_jobs": -1,
-            "class_weight": "balanced",
         }
         # LightGBM — дерево решений: StandardScaler не нужен (сплиты монотонны к масштабу)
-        model = lgb.LGBMClassifier(**params)
+        model = lgb.LGBMRegressor(**params)
         return _cv_pnl_score(model, X, y, close_window, cv, trial=trial)
 
     # n_startup_trials=20: LightGBM имеет 9 параметров → нужно ~2–3x random trials
@@ -330,13 +327,11 @@ def tune_lgbm(
 
     best_params = study.best_params
     best_params.update({
-        "objective": "multiclass",
-        "num_class": 3,
-        "subsample_freq": 1,  # обязателен чтобы subsample реально применялся
+        "objective": "regression_l1",
+        "subsample_freq": 1,
         "random_state": ml_settings.random_state,
         "verbose": -1,
         "n_jobs": -1,
-        "class_weight": "balanced",
     })
 
     logger.info(
@@ -391,10 +386,9 @@ def tune_extra_trees(
             "min_impurity_decrease": trial.suggest_float("min_impurity_decrease", 0.0, 0.01),
             "random_state": ml_settings.random_state,
             "n_jobs": -1,
-            "class_weight": "balanced",
         }
         # ExtraTrees — дерево решений: StandardScaler не влияет (сплиты монотонны к масштабу)
-        model = ExtraTreesClassifier(**params)
+        model = ExtraTreesRegressor(**params)
         return _cv_pnl_score(model, X, y, close_window, cv, trial=trial)
 
     # n_startup_trials=15: ExtraTrees имеет 6 параметров → нужно ~2–3x random trials
@@ -413,7 +407,7 @@ def tune_extra_trees(
     )
 
     best_params = study.best_params
-    best_params.update({"random_state": ml_settings.random_state, "n_jobs": -1, "class_weight": "balanced"})
+    best_params.update({"random_state": ml_settings.random_state, "n_jobs": -1})
 
     logger.info(
         "ExtraTrees tuning complete",

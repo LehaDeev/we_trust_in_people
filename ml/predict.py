@@ -27,7 +27,6 @@ import numpy as np
 from config.settings import ml_settings, redis_settings
 from ml.dataset import load_ticker_data, load_usdrub_data, merge_usdrub
 from ml.features import compute_features
-from ml.labels import LABEL_NAMES
 from utils.logger import logger
 from utils.redis_cache import get_redis
 
@@ -157,10 +156,18 @@ async def predict_signal(
     last_row = feat_df[feature_columns].iloc[[-1]]
 
     # ── Предсказание: усредняем вероятности трёх моделей ансамбля ────────────
-    proba = ensemble.predict_proba(last_row)[0]
-    predicted_class = int(np.argmax(proba))
-    confidence = float(proba[predicted_class])
-    signal = LABEL_NAMES[predicted_class]
+    # Регрессор предсказывает ожидаемый net P&L (доля) для текущего бара.
+    # BUY  если pnl_pred >= 0 (ожидаем прибыль; scheduler дополнительно
+    #      проверяет pnl_pred >= per-ticker threshold из best_threshold_*.json).
+    # SELL если pnl_pred <  0 (ожидаем убыток — сигнал выхода из позиции).
+    # HOLD если модель предсказывает ровно 0 (крайне редко на практике).
+    pnl_pred = float(ensemble.predict(last_row)[0])
+    if pnl_pred > 0:
+        signal = "BUY"
+    elif pnl_pred < 0:
+        signal = "SELL"
+    else:
+        signal = "HOLD"
 
     # volume_ratio последнего бара: используется как фильтр подтверждения в scheduler
     # > 1.0 — объём выше среднего (движение подтверждено), < 1.0 — слабый объём
@@ -169,11 +176,9 @@ async def predict_signal(
     result = {
         "ticker": ticker,
         "signal": signal,
-        "confidence": round(confidence, 4),
-        "probabilities": {
-            name: round(float(p), 4)
-            for name, p in zip(LABEL_NAMES, proba)
-        },
+        # confidence = предсказанный net P&L (доля; например 0.008 = 0.8%).
+        # Scheduler сравнивает это значение с per-ticker порогом входа.
+        "confidence": round(pnl_pred, 6),
         "volume_ratio": round(last_volume_ratio, 4),
     }
 

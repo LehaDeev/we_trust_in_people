@@ -527,12 +527,12 @@ class TradingScheduler:
                         logger.debug("Позиция уже открыта", ticker=ticker)
                         continue
 
-                    # Используем proba[BUY] явно — совпадает с логикой оптимизации порога.
-                    # sig["confidence"] тоже равен proba[BUY] когда signal==BUY,
-                    # но явное чтение из probabilities исключает двусмысленность.
-                    buy_proba: float = sig.get("probabilities", {}).get("BUY", confidence)
+                    # confidence = предсказанный net P&L (регрессор).
+                    # Сравниваем с per-ticker порогом входа из best_threshold_*.json
+                    # (диапазон [0.0, 0.02]), оптимизированным на holdout по Sortino.
+                    buy_confidence: float = sig.get("confidence", 0.0)
                     ticker_threshold = _ticker_threshold(ticker)
-                    if buy_proba < ticker_threshold:
+                    if buy_confidence < ticker_threshold:
                         logger.debug(
                             "Уверенность ниже порога",
                             ticker=ticker,

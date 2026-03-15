@@ -1,12 +1,12 @@
 """
-Генерация меток для обучения ML с учителем.
+Генерация целей для ML-моделей.
 
-Два режима:
-  create_labels()     — по сырой доходности за окно lookahead (устарел, оставлен для совместимости).
-  create_labels_sim() — по результату SL/TP-симуляции (рекомендуется).
+  compute_pnl_targets() — непрерывный net P&L для регрессии (основной режим).
+  create_labels_sim()   — дискретные BUY/SELL/HOLD (устарел, для внешних скриптов).
+  create_labels()       — по сырой доходности без SL/TP (устарел).
 
-Симуляционные метки устраняют рассогласование между целью обучения и метрикой HPO:
-модель учится предсказывать ровно то, что оценивает Sortino-симуляция — прибыльность
+compute_pnl_targets() устраняет рассогласование между целью обучения и метрикой HPO:
+регрессор учится предсказывать ровно то, что измеряет Sortino-симуляция — чистый P&L
 реальной сделки с учётом SL/TP, комиссии и налога.
 """
 import numpy as np
@@ -19,6 +19,74 @@ LABEL_MAP: dict[str, int] = {
     "BUY":  2,
 }
 LABEL_NAMES: list[str] = ["SELL", "HOLD", "BUY"]  # индекс → название
+
+
+def compute_pnl_targets(
+    index: pd.Index,
+    close_window: np.ndarray,
+    lookahead: int,
+    commission_pct: float,
+    sl_pct: float,
+    tp_pct: float,
+    tax_pct: float,
+) -> pd.Series:
+    """
+    Вычислить целевой net P&L для регрессии.
+
+    Для каждого бара симулируется: открыть BUY на close[t], закрыть по первому
+    достижению SL или TP в пределах lookahead свечей, иначе close[t+lookahead].
+    SL/TP-триггеры рассчитаны в NET-базисе (совпадают с adjusted_sl_price /
+    adjusted_tp_price из trading/profitability.py).
+
+    Результат — чистый P&L после комиссии и НДФЛ:
+        gross = (exit - entry) / entry
+        commission = 2 × commission_pct
+        tax = max(0, (gross − commission) × tax_pct)
+        net = gross − commission − tax
+
+    Аргументы:
+        index:          pd.Index строк (время), совпадает с осью 0 close_window.
+        close_window:   numpy array (N, lookahead+1):
+                        close_window[i, 0] = close[t_i] (цена входа),
+                        close_window[i, j] = close[t_i + j], j=1..lookahead.
+        lookahead:      максимальный горизонт удержания позиции (свечей).
+        commission_pct: комиссия брокера (доля за одну сторону; 0.003 = 0.3%).
+        sl_pct:         стоп-лосс от цены входа (доля; 0.03 = 3%).
+        tp_pct:         тейк-профит от цены входа (доля; 0.05 = 5%).
+        tax_pct:        ставка НДФЛ на прибыль (0.13 = 13%).
+
+    Возвращает:
+        pd.Series с net P&L (float) для каждого бара, индекс = index.
+    """
+    entry = close_window[:, 0]
+
+    c = commission_pct
+    t = max(tax_pct, 1e-9)
+    sl_prices = entry * (1.0 + c - sl_pct) / (1.0 - c)
+    tp_prices = entry * ((1.0 + c) + tp_pct / (1.0 - t)) / (1.0 - c)
+
+    exit_prices = close_window[:, lookahead].copy()
+    still_open = np.ones(len(entry), dtype=bool)
+
+    for j in range(1, lookahead + 1):
+        prices_j = close_window[:, j]
+        hit_sl = still_open & (prices_j <= sl_prices)
+        hit_tp = still_open & (prices_j >= tp_prices)
+        exit_prices[hit_sl] = sl_prices[hit_sl]
+        exit_prices[hit_tp] = tp_prices[hit_tp]
+        still_open &= ~(hit_sl | hit_tp)
+
+    with np.errstate(invalid="ignore", divide="ignore"):
+        gross = np.where(entry > 0.0, (exit_prices - entry) / entry, 0.0)
+
+    commission = 2.0 * commission_pct
+    tax = np.maximum(0.0, (gross - commission) * tax_pct)
+    net_pnl = gross - commission - tax
+
+    # Бары с нулевой/отрицательной ценой входа — нет данных, P&L = 0
+    net_pnl[entry <= 0.0] = 0.0
+
+    return pd.Series(net_pnl, index=index, name="pnl")
 
 
 def create_labels(

@@ -118,9 +118,11 @@ class MLSettings(BaseSettings):
     # Версия модели — суффикс для имён файлов весов (ensemble_v2.pkl)
     model_version: str = Field("v2", alias="ML_MODEL_VERSION")
 
-    # Параметры генерации меток
+    # Горизонт удержания позиции при генерации целей P&L
     lookahead: int = Field(4, alias="ML_LOOKAHEAD")          # свечей вперёд
-    threshold: float = Field(0.01, alias="ML_THRESHOLD")     # порог ±1% BUY/SELL
+    # Минимальный предсказанный net P&L для открытия сделки (fallback если нет per-ticker файла).
+    # Оптимальное значение подбирается per-ticker через Optuna → best_threshold_{ticker}.json.
+    threshold: float = Field(0.0, alias="ML_THRESHOLD")      # 0.0 = любой положительный прогноз
 
     # Кросс-валидация
     n_splits: int = Field(5, alias="ML_N_SPLITS")             # фолдов TimeSeriesSplit
@@ -232,8 +234,10 @@ class TradingSettings(BaseSettings):
 
     # Главный выключатель автоторговли (false = только логируем, не торгуем)
     enabled: bool = Field(False, alias="TRADING_ENABLED")
-    # Минимальная уверенность модели для открытия позиции (0.0 - 1.0)
-    confidence_threshold: float = Field(0.65, alias="TRADING_CONFIDENCE_THRESHOLD")
+    # Минимальный предсказанный net P&L для открытия позиции (fallback, если нет per-ticker файла).
+    # Регрессор возвращает ожидаемую чистую доходность сделки (доля, например 0.005 = 0.5%).
+    # Значение 0.0 = входим при любом положительном прогнозе; реальные пороги ~0.003..0.015.
+    confidence_threshold: float = Field(0.0, alias="TRADING_CONFIDENCE_THRESHOLD")
     # Количество лотов на каждую сделку
     lots_per_ticker: int = Field(1, alias="TRADING_LOTS_PER_TICKER")
     # Стоп-лосс: закрыть позицию при убытке (доля от цены входа, 0.03 = 3%)
