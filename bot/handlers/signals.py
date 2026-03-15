@@ -61,19 +61,25 @@ def _format_signal(result: dict) -> str:
         pct_of_threshold = confidence / threshold * 100
     else:
         pct_of_threshold = 100.0 if confidence >= 0 else 0.0
-    if passes_threshold:
-        strength_line = f"Сила сигнала: <b>{pct_of_threshold:.0f}%</b>  {threshold_mark}"
-        gap_line = "Порог пройден ✅"
+    if signal == "SELL":
+        # SELL: pnl_pred < 0, сила сигнала неприменима
+        extra_lines = ["Модель ожидает снижение"]
+    elif passes_threshold:
+        extra_lines = [
+            f"Сила сигнала: <b>{pct_of_threshold:.0f}%</b>  {threshold_mark}",
+            "Порог пройден ✅",
+        ]
     else:
         missing = 100 - pct_of_threshold
-        strength_line = f"Сила сигнала: <b>{pct_of_threshold:.0f}%</b> из 100  {threshold_mark}"
-        gap_line = f"Не хватает:  <b>{missing:.0f}%</b>"
+        extra_lines = [
+            f"Сила сигнала: <b>{pct_of_threshold:.0f}%</b> из 100  {threshold_mark}",
+            f"Не хватает:  <b>{missing:.0f}%</b>",
+        ]
 
     lines = [
         f"📈 <b>{ticker}</b>",
         f"Сигнал:   {emoji} <b>{signal}</b>",
-        strength_line,
-        gap_line,
+        *extra_lines,
         f"Объём:    <b>{volume_ratio:.2f}×</b> среднего{volume_suffix}",
     ]
     return "\n".join(lines)
