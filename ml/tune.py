@@ -354,14 +354,14 @@ def tune_extra_trees(
     version: str | None = None,
 ) -> dict:
     """
-    Подобрать гиперпараметры ExtraTreesClassifier через Optuna.
+    Подобрать гиперпараметры ExtraTreesRegressor через Optuna.
 
     ExtraTrees использует случайные пороги разбиений (вместо лучших как в RF),
     что даёт низкую корреляцию с LightGBM и реальное разнообразие ансамблю.
 
     Аргументы:
         X:        DataFrame признаков.
-        y:        Series меток (0, 1, 2).
+        y:        Series целевых P&L значений (float).
         n_trials: количество итераций (None = из ml_settings).
         version:  версия для имени файла (None = из ml_settings).
 
