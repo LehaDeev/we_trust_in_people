@@ -95,8 +95,8 @@ def _ensure_decimals(summary: dict) -> dict:
     """
     Привести все числовые поля словаря портфеля к типу Decimal.
 
-    Нужно для обратной совместимости: старый кеш Redis хранил Decimal как строки,
-    новый — как float. Оба варианта корректно конвертируются через Decimal(str(v)).
+    Decimal-поля хранятся в Redis как строки (default=str при json.dumps).
+    Decimal(str(v)) корректно восстанавливает точное значение без потери точности.
     """
     for field in _SUMMARY_DECIMAL_FIELDS:
         v = summary.get(field)
@@ -128,7 +128,7 @@ async def get_portfolio_summary() -> dict:
             cached = await redis.get(cache_key)
             if cached:
                 logger.debug("Portfolio cache hit", key=cache_key)
-                data = json.loads(cached, parse_float=lambda x: Decimal(x))
+                data = json.loads(cached)
                 return _ensure_decimals(data)
         except Exception as e:
             logger.warning("Redis get error", key=cache_key, error=str(e))
@@ -156,16 +156,13 @@ async def get_portfolio_summary() -> dict:
         "positions": positions,
     }
 
-    # ── Redis: сохраняем в кеш (Decimal → float, чтобы parse_float при чтении работал) ──
+    # ── Redis: сохраняем в кеш (Decimal → str для точности; _ensure_decimals восстановит) ──
     if redis is not None:
         try:
             await redis.setex(
                 cache_key,
                 redis_settings.portfolio_ttl,
-                json.dumps(
-                    summary,
-                    default=lambda v: float(v) if isinstance(v, Decimal) else str(v),
-                ),
+                json.dumps(summary, default=str),
             )
             logger.debug("Portfolio cached", ttl=redis_settings.portfolio_ttl)
         except Exception as e:

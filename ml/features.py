@@ -185,7 +185,8 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     mfv = np.where(hl_range != 0, ((close - low) - (high - close)) / hl_range_safe * volume, 0.0)
     mfv_series = pd.Series(mfv)
     vol_series = pd.Series(volume)
-    df["cmf_20"] = (mfv_series.rolling(20).sum() / vol_series.rolling(20).sum()).values
+    vol_sum_20 = vol_series.rolling(20).sum().replace(0, np.nan)
+    df["cmf_20"] = (mfv_series.rolling(20).sum() / vol_sum_20).fillna(0.0).values
     # Изменения объёма: резкий рост объёма часто предшествует ценовому движению
     df["volume_change_1h"] = vol_series.pct_change(periods=1).values
     df["volume_change_4h"] = vol_series.pct_change(periods=4).values
