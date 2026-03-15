@@ -15,7 +15,7 @@
     from ml.predict import predict_signal
 
     result = asyncio.run(predict_signal("SBER"))
-    # {"ticker": "SBER", "signal": "BUY", "confidence": 0.72, "probabilities": {...}}
+    # {"ticker": "SBER", "signal": "BUY", "confidence": 0.0083, "volume_ratio": 1.24}
 """
 import json
 import pickle
@@ -39,6 +39,28 @@ WEIGHTS_DIR = Path(__file__).parent / "weights"
 _model_cache: OrderedDict[str, tuple] = OrderedDict()
 
 
+def _load_entry_threshold(ticker: str, version: str) -> float:
+    """
+    Загрузить абсолютный порог входа pnl_pred для тикера из файла весов.
+
+    Порог — абсолютное значение pnl_pred, соответствующее оптимальному персентилю
+    на валидационной выборке. Если файл не найден — возвращает ml_settings.threshold.
+
+    Аргументы:
+        ticker:  тикер инструмента.
+        version: версия модели.
+
+    Возвращает:
+        Абсолютный порог (float). Может быть отрицательным при персентильном подходе.
+    """
+    path = WEIGHTS_DIR / f"best_threshold_{ticker}_{version}.json"
+    try:
+        with open(path) as f:
+            return float(json.load(f)["threshold"])
+    except Exception:
+        return ml_settings.threshold
+
+
 def _load_model(ticker: str, version: str) -> tuple:
     """
     Загрузить ансамбль тикера и список признаков (из памяти или с диска).
@@ -48,7 +70,7 @@ def _load_model(ticker: str, version: str) -> tuple:
         version: версия модели (например, "v2").
 
     Возвращает:
-        (ensemble, feature_columns): объект VotingClassifier и список имён признаков.
+        (ensemble, feature_columns): объект RankEnsemble и список имён признаков.
 
     Исключения:
         FileNotFoundError: если файл весов для тикера не найден.
@@ -105,8 +127,8 @@ async def predict_signal(
         Словарь с ключами:
             ticker (str):         тикер
             signal (str):         "BUY", "HOLD" или "SELL"
-            confidence (float):   вероятность для предсказанного класса
-            probabilities (dict): {"SELL": p, "HOLD": p, "BUY": p}
+            confidence (float):   предсказанный net P&L (доля; например 0.0083 = 0.83%).
+                                  Положительный → BUY, отрицательный → SELL, ноль → HOLD.
             volume_ratio (float): объём последнего бара / SMA_20 объёма (фильтр подтверждения)
 
     Исключения:
@@ -155,14 +177,16 @@ async def predict_signal(
 
     last_row = feat_df[feature_columns].iloc[[-1]]
 
-    # ── Предсказание: усредняем вероятности трёх моделей ансамбля ────────────
+    # ── Предсказание ──────────────────────────────────────────────────────────
     # Регрессор предсказывает ожидаемый net P&L (доля) для текущего бара.
-    # BUY  если pnl_pred >= 0 (ожидаем прибыль; scheduler дополнительно
-    #      проверяет pnl_pred >= per-ticker threshold из best_threshold_*.json).
-    # SELL если pnl_pred <  0 (ожидаем убыток — сигнал выхода из позиции).
-    # HOLD если модель предсказывает ровно 0 (крайне редко на практике).
+    # Порог загружается из best_threshold_{ticker}_{version}.json — абсолютное значение
+    # pnl_pred, соответствующее оптимальному персентилю (обычно негативное, например -0.003).
+    # BUY  если pnl_pred >= threshold (бар в топ-(100-P)% по прогнозу модели).
+    # SELL если pnl_pred < 0 (ожидаем убыток — сигнал выхода из позиции).
+    # HOLD иначе (между 0 и threshold: выше порога, но прогноз ещё положительный).
     pnl_pred = float(ensemble.predict(last_row)[0])
-    if pnl_pred > 0:
+    entry_threshold = _load_entry_threshold(ticker, version)
+    if pnl_pred >= entry_threshold:
         signal = "BUY"
     elif pnl_pred < 0:
         signal = "SELL"
@@ -186,7 +210,7 @@ async def predict_signal(
         "Signal generated",
         ticker=ticker,
         signal=signal,
-        confidence=round(confidence, 4),
+        confidence=round(pnl_pred, 4),
         volume_ratio=round(last_volume_ratio, 4),
     )
 

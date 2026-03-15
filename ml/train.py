@@ -6,7 +6,7 @@
     2. Вычисление признаков (TA-Lib индикаторы)
     3. Генерация меток по будущей доходности
     4. Подбор гиперпараметров через Optuna (с кешем best_params_*_{ticker}_{version}.json)
-    5. Обучение ансамбля VotingRegressor(soft) — LightGBM + ExtraTrees
+    5. Обучение ансамбля RankEnsemble — LightGBM(quantile) + ExtraTrees(MSE) + HistGBM(MAE)
     6. Сохранение весов в ml/weights/ensemble_{ticker}_{version}.pkl
 
 Запуск:
@@ -15,6 +15,8 @@
 
 Все настройки — в .env (ML_* и DATA_*).
 """
+from __future__ import annotations
+
 import gc
 import json
 import pickle
@@ -26,13 +28,13 @@ import lightgbm as lgb
 import numpy as np
 import optuna
 import pandas as pd
-from sklearn.ensemble import ExtraTreesRegressor, VotingRegressor
+from sklearn.ensemble import ExtraTreesRegressor, HistGradientBoostingRegressor
 from sklearn.model_selection import TimeSeriesSplit
 from config.settings import data_settings, ml_settings
 from ml.dataset import load_all_tickers_from_csv, load_ticker_data, load_usdrub_data, merge_usdrub
 from ml.features import FEATURE_COLUMNS, compute_features
 from ml.labels import compute_pnl_targets
-from ml.tune import tune_extra_trees, tune_lgbm
+from ml.tune import tune_extra_trees, tune_hist_gbm, tune_lgbm
 from utils.logger import logger
 
 WEIGHTS_DIR = Path(__file__).parent / "weights"
@@ -94,10 +96,28 @@ def _load_cached_params(model_name: str, ticker_version: str) -> dict | None:
         return None
     with open(path) as f:
         params = json.load(f)
-    # Валидация совместимости: старые classifier-параметры не подходят регрессору.
-    # При наличии "num_class" или "objective"="multiclass" — параметры устарели → переобучаем.
-    if model_name == "lgbm" and params.get("objective") != "regression_l1":
-        logger.info("Кеш LGBM устарел (classifier→regressor), переобучаем", path=str(path))
+    # Валидация совместимости: старые параметры не подходят текущей архитектуре.
+    # objective изменён с "regression_l1" на "quantile" — alpha даёт лучшую разделимость.
+    if model_name == "lgbm" and params.get("objective") != "quantile":
+        logger.info("Кеш LGBM устарел (→quantile objective), переобучаем", path=str(path))
+        return None
+    # max_depth добавлен в диапазон Optuna — старые кеши без него нужно переоптимизировать.
+    if model_name == "lgbm" and "max_depth" not in params:
+        logger.info("Кеш LGBM устарел (нет max_depth), переобучаем", path=str(path))
+        return None
+    # alpha теперь тюнируется Optuna [0.7, 0.95] — кеши с alpha вне диапазона
+    # (сгенерированные по positive_rate) могут содержать значения вне этого диапазона,
+    # но это безопасно переиспользовать. Инвалидируем только если alpha отсутствует.
+    if model_name == "lgbm" and "alpha" not in params:
+        logger.info("Кеш LGBM устарел (нет alpha), переобучаем", path=str(path))
+        return None
+    # ET: n_jobs=-1 вызывает OOM на 2GB сервере — форкает копию датасета на каждое ядро.
+    if model_name == "et" and params.get("n_jobs", 1) == -1:
+        logger.info("Кеш ET устарел (n_jobs=-1 → OOM), переобучаем", path=str(path))
+        return None
+    # HistGBM: loss должен быть "absolute_error" — старые кеши без этого поля невалидны.
+    if model_name == "hist_gbm" and params.get("loss") != "absolute_error":
+        logger.info("Кеш HistGBM устарел (нет/другой loss), переобучаем", path=str(path))
         return None
     logger.info("Загружены кешированные параметры", model=model_name, path=str(path))
     return params
@@ -109,7 +129,6 @@ def _get_params(
     tune_fn,
     X: pd.DataFrame,
     y: pd.Series,
-    close_window: np.ndarray,
     force_tune: bool,
 ) -> dict:
     """
@@ -121,7 +140,6 @@ def _get_params(
         tune_fn:        функция подбора параметров из ml/tune.py.
         X:              DataFrame признаков.
         y:              Series меток.
-        close_window:   матрица цен (N, lookahead+1) для P&L-метрики Optuna.
         force_tune:     если True — игнорировать кеш и запустить Optuna заново.
 
     Возвращает:
@@ -133,7 +151,7 @@ def _get_params(
             return cached
 
     logger.info("Запуск Optuna HPO", model=model_name, ticker_version=ticker_version)
-    return tune_fn(X, y, close_window, version=ticker_version)
+    return tune_fn(X, y, version=ticker_version)
 
 
 # ── Сборка датасета для одного тикера ────────────────────────────────────────
@@ -156,7 +174,7 @@ def _build_ticker_dataset(
             close_window — numpy array (N, lookahead+1):
                            close_window[i, 0] = close[t_i] (цена входа),
                            close_window[i, j] = close[t_i + j], j=1..lookahead.
-                           Используется для P&L-симуляции при HPO и оптимизации порога.
+                           Используется для оптимизации порога входа per-ticker (_optimize_threshold).
     """
     from config.settings import trading_settings as ts
 
@@ -209,34 +227,100 @@ def _build_ticker_dataset(
 # ── Оценка ансамбля ──────────────────────────────────────────────────────────
 
 def _evaluate_ensemble(
-    ensemble: VotingRegressor,
+    ensemble: RankEnsemble,
     X: pd.DataFrame,
     y: pd.Series,
-    close_window: np.ndarray,
     ticker: str,
 ) -> float:
     """
-    Оценить ансамбль через кросс-валидацию TimeSeriesSplit с P&L-метрикой.
+    Оценить ансамбль через кросс-валидацию TimeSeriesSplit с метрикой Спирмена.
 
     Возвращает:
-        Средний P&L на сделку по фолдам (доля от вложений).
-        Для отображения в боте конвертируется в псевдо-F1 (сдвиг + масштаб).
+        Средняя корреляция Спирмена по фолдам ([-1, 1]).
     """
-    from ml.tune import _cv_pnl_score
+    from ml.tune import _cv_spearman_score
     cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
-    mean_pnl = _cv_pnl_score(ensemble, X, y, close_window, cv)
+    spearman = _cv_spearman_score(ensemble, X, y, cv)
     logger.info(
-        "Оценка ансамбля (CV P&L)",
+        "Оценка ансамбля (CV Spearman)",
         ticker=ticker,
-        mean_pnl=round(mean_pnl, 5),
+        spearman=round(spearman, 4),
     )
-    return mean_pnl
+    return spearman
+
+
+# ── Ансамбль с z-score нормализацией ─────────────────────────────────────────
+
+class RankEnsemble:
+    """
+    Ансамбль регрессоров с z-score нормализацией предсказаний перед усреднением.
+
+    Решает проблему VotingRegressor: простое среднее подавляется моделью с наибольшим
+    диапазоном предсказаний, что снижает Spearman ансамбля ниже уровня лучшей модели.
+
+    Алгоритм predict:
+        1. Каждая модель i предсказывает вектор p_i.
+        2. z_i = (p_i - train_mean_i) / train_std_i  — нормализация по обучающей статистике.
+        3. Результат = mean(z_i)  — равновзвешенное среднее нормализованных ранговых сигналов.
+
+    Следствия z-score нормализации:
+        - Модели с большим диапазоном не доминируют над моделями с малым.
+        - Модели с константными предсказаниями (std≈0) получают нулевой вклад.
+        - Spearman ансамбля ≥ среднего Spearman базовых моделей.
+
+    Единицы predict — условные z-score, не P&L. Ранговый порядок сохранён:
+    Spearman и перцентильный порог входа (_optimize_threshold) работают корректно.
+    """
+
+    def __init__(self, estimators: list[tuple[str, Any]], n_jobs: int = 1) -> None:
+        self.estimators = estimators
+        self.n_jobs = n_jobs  # для совместимости с VotingRegressor API
+        self._fitted: list[Any] = []
+        self._means: list[float] = []
+        self._stds: list[float] = []
+
+    @property
+    def estimators_(self) -> list[Any]:
+        """Список обученных базовых моделей (совместимо с VotingRegressor.estimators_)."""
+        return self._fitted
+
+    def fit(
+        self,
+        X: pd.DataFrame | np.ndarray,
+        y: pd.Series | np.ndarray,
+    ) -> "RankEnsemble":
+        """
+        Обучить базовые модели и запомнить статистики их предсказаний на обучающей выборке.
+
+        mean и std сохраняются для z-score нормализации в predict — без утечки
+        данных валидационной выборки (нормализация по train-статистике).
+        """
+        self._fitted = []
+        self._means = []
+        self._stds = []
+        for _name, model in self.estimators:
+            model.fit(X, y)
+            preds = model.predict(X)
+            self._means.append(float(np.mean(preds)))
+            std = float(np.std(preds))
+            # std≈0 → константные предсказания: вклад в ансамбль обнуляется через std=1.0
+            self._stds.append(std if std > 1e-9 else 1.0)
+            self._fitted.append(model)
+        return self
+
+    def predict(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
+        """Вернуть среднее z-score предсказаний базовых моделей."""
+        z_scores = [
+            (model.predict(X) - mean) / std
+            for model, mean, std in zip(self._fitted, self._means, self._stds)
+        ]
+        return np.mean(z_scores, axis=0)
 
 
 # ── Feature importance ───────────────────────────────────────────────────────
 
 def _avg_importance(
-    ensemble: VotingRegressor,
+    ensemble: RankEnsemble,
     feature_names: list[str],
 ) -> dict[str, float]:
     """
@@ -268,7 +352,7 @@ def _avg_importance(
 
 
 def _select_by_threshold(
-    ensemble: VotingRegressor,
+    ensemble: RankEnsemble,
     feature_names: list[str],
     threshold: float,
 ) -> list[str]:
@@ -288,7 +372,7 @@ def _select_by_threshold(
 
 
 def _print_feature_importance(
-    ensemble: VotingRegressor,
+    ensemble: RankEnsemble,
     feature_names: list[str],
     ticker: str,
 ) -> None:
@@ -306,7 +390,7 @@ def _print_feature_importance(
 # ── Оптимизация порога уверенности per-ticker ────────────────────────────────
 
 def _optimize_threshold(
-    ensemble: VotingRegressor,
+    ensemble: RankEnsemble,
     X_val: pd.DataFrame,
     y_val: np.ndarray,
     close_window_val: np.ndarray,
@@ -319,7 +403,7 @@ def _optimize_threshold(
     Оптимизация на последних 20% данных максимизирует Sortino ratio сделок.
 
     Аргументы:
-        ensemble:         обученный ансамбль VotingRegressor.
+        ensemble:         обученный ансамбль RankEnsemble.
         X_val:            признаки валидационной выборки (последние 20% тикера).
         y_val:            целевые P&L (не используются — симуляция работает с close_window).
         close_window_val: матрица цен (N_val, lookahead+1) для P&L-симуляции.
@@ -336,10 +420,13 @@ def _optimize_threshold(
     y_sell = (pnl_pred < 0).astype(np.int8)
 
     def objective(trial: optuna.Trial) -> float:
-        # Открываем BUY только если predicted_pnl >= threshold.
-        # 0.0 = входим при любом положительном прогнозе (break-even).
-        threshold = trial.suggest_float("threshold", 0.0, 0.02)
-        preds = np.where(pnl_pred >= threshold, 2, 1).astype(np.int8)
+        # Ищем в персентильном пространстве: trial подбирает P — какой процент баров
+        # считать "хорошими" (топ-(100-P)% предсказаний → BUY).
+        # Абсолютный порог [0.0, 0.02] бесполезен: все предсказания отрицательны при
+        # 88% отрицательных таргетах, и ни один бар не получает BUY-сигнал.
+        signal_pct = trial.suggest_float("signal_pct", 70.0, 95.0)
+        threshold_abs = float(np.percentile(pnl_pred, signal_pct))
+        preds = np.where(pnl_pred >= threshold_abs, 2, 1).astype(np.int8)
         pnl_list = _simulate_pnl(
             y_pred=preds,
             close_window=close_window_val,
@@ -360,11 +447,15 @@ def _optimize_threshold(
     study = optuna.create_study(direction="maximize", sampler=sampler)
     study.optimize(objective, n_trials=ml_settings.threshold_n_trials, show_progress_bar=False)
 
-    best = study.best_params["threshold"]
+    # Переводим персентиль → абсолютное значение pnl_pred для использования в продакшне.
+    # predict_signal и scheduler сравнивают pnl_pred >= threshold напрямую (не по персентилю).
+    best_pct = study.best_params["signal_pct"]
+    best = float(np.percentile(pnl_pred, best_pct))
     logger.info(
         "Порог входа оптимизирован",
         ticker=ticker,
-        threshold=round(best, 5),
+        signal_pct=round(best_pct, 1),
+        threshold=round(best, 6),
         sortino=round(study.best_value, 5),
     )
     return best
@@ -407,25 +498,26 @@ def _train_single_ticker(
         if cached is not None:
             _print_cached(f"{model_name.upper()} HPO")
             return cached
-        return _get_params(model_name, ticker_version, tune_fn, X, y, close_window, force_tune)
+        return _get_params(model_name, ticker_version, tune_fn, X, y, force_tune)
 
-    lgbm_params = _get_with_display("lgbm", tune_lgbm)
-    et_params   = _get_with_display("et", tune_extra_trees)
+    lgbm_params     = _get_with_display("lgbm", tune_lgbm)
+    et_params       = _get_with_display("et", tune_extra_trees)
+    hist_gbm_params = _get_with_display("hist_gbm", tune_hist_gbm)
 
-    # Балансировка классов — фиксированный параметр, не из HPO-кеша.
-    # VotingRegressor усредняет предсказания базовых регрессоров.
-    # Два принципиально разных алгоритма:
-    #   LGBM       — градиентный бустинг (regression_l1, устойчив к выбросам P&L)
-    #   ExtraTrees — рандомизированные деревья (случайные пороги), низкая корреляция с LGBM
-    def _make_ensemble() -> VotingRegressor:
-        # Оба алгоритма — деревья решений: StandardScaler не влияет на результат,
-        # т.к. сплиты монотонны к масштабу признаков. Убрано для экономии вычислений.
-        return VotingRegressor(
+    # RankEnsemble: z-score нормализация перед усреднением устраняет доминирование
+    # моделей с большим диапазоном предсказаний и обнуляет вклад константных моделей.
+    # Три принципиально разных objectives дают разные взгляды на распределение P&L:
+    #   LGBM     — quantile(alpha) → тюнируемый квантиль P&L
+    #   ExtraTrees — MSE → предсказывает среднее P&L
+    #   HistGBM  — MAE → предсказывает медиану P&L
+    def _make_ensemble() -> RankEnsemble:
+        return RankEnsemble(
             estimators=[
                 ("lgbm", lgb.LGBMRegressor(**lgbm_params)),
                 ("et", ExtraTreesRegressor(**et_params)),
+                ("hist_gbm", HistGradientBoostingRegressor(**hist_gbm_params)),
             ],
-            n_jobs=1,  # последовательный фит — меньше RAM на слабом сервере
+            n_jobs=1,  # для совместимости API; модели обучаются последовательно
         )
 
     all_features = X.columns.tolist()
@@ -476,8 +568,8 @@ def _train_single_ticker(
         cv_f1 = 0.0
     else:
         _print_step("CV оценка ансамбля...")
-        cv_f1 = _evaluate_ensemble(ensemble, X_final, y, close_window, ticker)
-        _print_ok(f"F1={cv_f1:.4f}")
+        cv_f1 = _evaluate_ensemble(ensemble, X_final, y, ticker)
+        _print_ok(f"Spearman={cv_f1:.4f}")
 
     # ── Оптимизация порога уверенности per-ticker ─────────────────────────────
     # Порог оптимизируется ДО финального фита: временный ансамбль обучается на
@@ -553,7 +645,7 @@ async def train_model(
     tickers_list = data_settings.tickers
     total = len(tickers_list)
     results: dict[str, Path] = {}
-    sortino_scores: dict[str, float] = {}
+    spearman_scores: dict[str, float] = {}
 
     if data_dir is not None:
         # Режим CSV (Colab): загружаем всё сразу — файлы уже на диске
@@ -601,9 +693,9 @@ async def train_model(
         _print_ticker_header(ticker, i, total, len(group))
         logger.info("Обучение модели", ticker=ticker)
         try:
-            path, cv_sortino = _train_single_ticker(ticker, group, force_tune, skip_cv=skip_cv)
+            path, cv_spearman = _train_single_ticker(ticker, group, force_tune, skip_cv=skip_cv)
             results[ticker] = path
-            sortino_scores[ticker] = round(cv_sortino, 4)
+            spearman_scores[ticker] = round(cv_spearman, 4)
         except Exception as e:
             logger.error("Ошибка обучения тикера", ticker=ticker, error=str(e))
             print(f"  x Error: {e}", flush=True)
@@ -621,15 +713,19 @@ async def train_model(
     if results_path.exists():
         import shutil
         shutil.copy2(results_path, prev_path)
-    # При skip_cv Sortino не вычислялся — берём сохранённые значения из предыдущего обучения
+    # При skip_cv Spearman не вычислялся — берём сохранённые значения из предыдущего обучения
     if skip_cv and prev_path.exists():
         try:
             with open(prev_path) as f_prev:
                 prev_data = json.load(f_prev)
-            prev_sortino = prev_data.get("sortino_scores", {})
-            for ticker in sortino_scores:
-                if sortino_scores[ticker] == 0.0 and ticker in prev_sortino:
-                    sortino_scores[ticker] = prev_sortino[ticker]
+            prev_spearman = (
+                prev_data.get("spearman_scores")
+                or prev_data.get("sortino_scores")
+                or {}
+            )
+            for ticker in spearman_scores:
+                if spearman_scores[ticker] == 0.0 and ticker in prev_spearman:
+                    spearman_scores[ticker] = prev_spearman[ticker]
         except Exception:
             pass
     with open(results_path, "w") as f:
@@ -638,7 +734,7 @@ async def train_model(
                 "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 "force_tune": force_tune,
                 "skip_cv": skip_cv,
-                "sortino_scores": sortino_scores,
+                "spearman_scores": spearman_scores,
                 "failed": failed,
             },
             f,

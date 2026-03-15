@@ -36,6 +36,7 @@
 | `ML_RANDOM_STATE` | Seed для воспроизводимости (Optuna, ExtraTrees) | `42` |
 | `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `75` |
 | `ML_OPTUNA_TRIALS_ET` | Итераций Optuna для ExtraTreesRegressor | `40` |
+| `ML_OPTUNA_TRIALS_HIST_GBM` | Итераций Optuna для HistGradientBoostingRegressor | `40` |
 | `ML_FEATURE_IMPORTANCE_THRESHOLD` | Порог importance для отбора признаков per-ticker (`0.0` = отключить) | `0.01` |
 | `ML_PRINT_FEATURE_IMPORTANCE` | Выводить таблицу важности признаков после обучения | `false` |
 | `ML_FORCE_TUNE` | Принудительный перезапуск Optuna | `false` |

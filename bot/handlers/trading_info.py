@@ -230,7 +230,7 @@ async def cb_status(callback: CallbackQuery) -> None:
         "ℹ️ <b>Параметры торговли</b>\n\n"
         f"💵 Свободно:       <b>{balance_str}</b>\n\n"
         f"Режим:             <b>{mode_str}</b>\n"
-        f"Порог P(BUY):      <b>per-ticker</b> (fallback ≥ {cfg.confidence_threshold * 100:.0f}%)\n"
+        f"Порог P&L входа:   <b>per-ticker</b> (fallback ≥ {cfg.confidence_threshold * 100:.3f}%)\n"
         f"Лотов на сделку:   <b>{cfg.lots_per_ticker}</b>\n"
         f"Макс. позиций:     <b>{cfg.max_open_positions}</b>\n"
         f"Интервал:          <b>{cfg.check_interval_seconds} сек</b>\n\n"
@@ -267,18 +267,20 @@ def _ml_nightly_status(trained_msk: datetime, force_tune: bool) -> str:
 
 
 def _load_ticker_threshold(ticker: str) -> str:
-    """Загрузить порог уверенности тикера из файла весов. Возвращает строку вида '0.62'."""
+    """Загрузить порог net P&L тикера из файла весов. Возвращает строку вида '+0.30%'."""
     path = _RESULTS_PATH.parent / f"best_threshold_{ticker}_{ml_settings.model_version}.json"
     try:
         with open(path) as f:
-            return f"{json.load(f)['threshold']:.2f}"
+            thr = json.load(f)["threshold"]
+        sign = "+" if thr >= 0 else ""
+        return f"{sign}{thr * 100:.3f}%"
     except Exception:
         return "—"
 
 
 @router.callback_query(lambda c: c.data == "trading:ml_status")
 async def cb_ml_status(callback: CallbackQuery) -> None:
-    """Показать статус ML-моделей: дата обучения, Sortino и порог уверенности по тикерам."""
+    """Показать статус ML-моделей: дата обучения, Spearman и порог уверенности по тикерам."""
     await callback.answer("⏳ Загружаю данные моделей...")
 
     if not _RESULTS_PATH.exists():
@@ -298,8 +300,12 @@ async def cb_ml_status(callback: CallbackQuery) -> None:
             trained_at = trained_at.replace(tzinfo=zoneinfo.ZoneInfo("UTC"))
         trained_msk = trained_at.astimezone(_RETRAIN_TZ)
         force_tune: bool = data["force_tune"]
-        # Поддержка старого формата (f1_scores) и нового (sortino_scores)
-        sortino_scores: dict[str, float] = data.get("sortino_scores") or data.get("f1_scores", {})
+        # Поддержка форматов: spearman_scores (новый) → sortino_scores → f1_scores (старые)
+        spearman_scores: dict[str, float] = (
+            data.get("spearman_scores")
+            or data.get("sortino_scores")
+            or data.get("f1_scores", {})
+        )
         failed: list[str] = data.get("failed", [])
 
         # Загружаем предыдущие результаты для сравнения дельты
@@ -309,11 +315,15 @@ async def cb_ml_status(callback: CallbackQuery) -> None:
             try:
                 with open(prev_path) as pf:
                     prev_data = json.load(pf)
-                prev_scores = prev_data.get("sortino_scores") or prev_data.get("f1_scores", {})
+                prev_scores = (
+                    prev_data.get("spearman_scores")
+                    or prev_data.get("sortino_scores")
+                    or prev_data.get("f1_scores", {})
+                )
             except Exception:
                 pass
 
-        avg = sum(sortino_scores.values()) / len(sortino_scores) if sortino_scores else 0.0
+        avg = sum(spearman_scores.values()) / len(spearman_scores) if spearman_scores else 0.0
         prev_avg = sum(prev_scores.values()) / len(prev_scores) if prev_scores else None
 
         def _delta(ticker: str, cur: float) -> str:
@@ -324,10 +334,10 @@ async def cb_ml_status(callback: CallbackQuery) -> None:
                 return " (=)"
             return f" ({d:+.4f})"
 
-        # Строки: тикер | Sortino | порог | дельта
+        # Строки: тикер | Spearman | порог P&L | дельта
         score_lines = "\n".join(
-            f"  {ticker:<6} {score:.4f}  thr={_load_ticker_threshold(ticker)}{_delta(ticker, score)}"
-            for ticker, score in sorted(sortino_scores.items())
+            f"  {ticker:<6} {score:+.4f}  thr={_load_ticker_threshold(ticker)}{_delta(ticker, score)}"
+            for ticker, score in sorted(spearman_scores.items())
         )
         avg_delta = ""
         if prev_avg is not None:
@@ -340,8 +350,8 @@ async def cb_ml_status(callback: CallbackQuery) -> None:
             f"Последнее обучение:  <b>{trained_msk.strftime('%d.%m.%Y %H:%M')} МСК</b>\n"
             f"Ночное сегодня:      <b>{_ml_nightly_status(trained_msk, force_tune)}</b>\n"
             f"Optuna (force_tune): <b>{'Да' if force_tune else 'Нет'}</b>\n\n"
-            f"<b>Sortino / порог по тикерам:</b>\n"
-            f"<code>{score_lines}\n{'─'*28}\n  {'Среднее':<6} {avg:.4f}{avg_delta}</code>"
+            f"<b>Spearman / порог P&L по тикерам:</b>\n"
+            f"<code>{score_lines}\n{'─'*32}\n  {'Среднее':<6} {avg:+.4f}{avg_delta}</code>"
             f"{failed_str}"
         )
     except Exception as e:

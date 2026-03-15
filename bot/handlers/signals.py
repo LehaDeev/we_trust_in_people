@@ -34,21 +34,18 @@ def _format_signal(result: dict) -> str:
 
     Пример вывода:
         📈 SBER
-        Сигнал: 🟢 BUY
-        P(BUY):  72.4%  |  порог: 58.0%  ✅
-        Объём:   1.24× среднего
-
-        SELL: 12.3% | HOLD: 15.3% | BUY: 72.4%
+        Сигнал:   🟢 BUY
+        P&L пред: +0.83%  |  порог: +0.30%  ✅
+        Объём:    1.24× среднего
     """
     ticker = result["ticker"]
     signal = result["signal"]
-    proba = result["probabilities"]
-    buy_proba = proba["BUY"] * 100
+    # confidence — предсказанный net P&L (доля), например 0.0083 = 0.83%
+    confidence: float = result.get("confidence", 0.0)
     volume_ratio: float = result.get("volume_ratio", 1.0)
 
     threshold = _ticker_threshold(ticker)
-    threshold_pct = threshold * 100
-    passes_threshold = proba["BUY"] >= threshold
+    passes_threshold = confidence >= threshold
     threshold_mark = "✅" if passes_threshold else "❌"
 
     volume_min = trading_settings.volume_min_ratio
@@ -58,14 +55,14 @@ def _format_signal(result: dict) -> str:
     volume_suffix = f"  {volume_mark}" if volume_min > 1.0 else ""
 
     emoji = _SIGNAL_EMOJI.get(signal, "⚪")
+    conf_sign = "+" if confidence >= 0 else ""
+    thr_sign = "+" if threshold >= 0 else ""
 
     lines = [
         f"📈 <b>{ticker}</b>",
-        f"Сигнал:  {emoji} <b>{signal}</b>",
-        f"P(BUY):  <b>{buy_proba:.1f}%</b>  |  порог: {threshold_pct:.1f}%  {threshold_mark}",
-        f"Объём:   <b>{volume_ratio:.2f}×</b> среднего{volume_suffix}",
-        "",
-        f"SELL: {proba['SELL']*100:.1f}% | HOLD: {proba['HOLD']*100:.1f}% | BUY: {proba['BUY']*100:.1f}%",
+        f"Сигнал:   {emoji} <b>{signal}</b>",
+        f"P&L пред: <b>{conf_sign}{confidence * 100:.3f}%</b>  |  порог: {thr_sign}{threshold * 100:.3f}%  {threshold_mark}",
+        f"Объём:    <b>{volume_ratio:.2f}×</b> среднего{volume_suffix}",
     ]
     return "\n".join(lines)
 

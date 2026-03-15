@@ -138,6 +138,7 @@ class MLSettings(BaseSettings):
     # Количество итераций Optuna для каждой модели ансамбля
     optuna_trials_lgbm: int = Field(25, alias="ML_OPTUNA_TRIALS_LGBM")
     optuna_trials_et: int = Field(15, alias="ML_OPTUNA_TRIALS_ET")
+    optuna_trials_hist_gbm: int = Field(40, alias="ML_OPTUNA_TRIALS_HIST_GBM")
 
     # Минимум свечей для инференса (50 прогрев + 200 буфер)
     min_candles_predict: int = Field(250, alias="ML_MIN_CANDLES_PREDICT")
@@ -163,6 +164,7 @@ class MLSettings(BaseSettings):
     # Тикеры обрабатываются поочерёдно → достаточно 1.
     # Увеличить если нужен параллельный инференс нескольких тикеров.
     model_cache_size: int = Field(1, alias="ML_MODEL_CACHE_SIZE")
+
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 

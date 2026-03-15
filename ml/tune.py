@@ -3,12 +3,13 @@
 
 Для каждой модели создаётся отдельное Optuna-исследование (study).
 Оценка производится через кросс-валидацию TimeSeriesSplit(n_splits=ML_N_SPLITS)
-с метрикой средний P&L на сделку (с учётом SL/TP и комиссии) — напрямую отражает
-торговую прибыльность модели. HOLD-сигналы не создают сделок и не влияют на метрику.
+с метрикой средняя корреляция Спирмена между pnl_pred и реальным P&L —
+чисто измеряет качество ранжирования без зависимости от порога входа.
 
 Лучшие параметры сохраняются в ml/weights/best_params_{model}_{version}.json.
 """
 import json
+import warnings
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ import lightgbm as lgb
 import numpy as np
 import optuna
 import pandas as pd
+from scipy.stats import ConstantInputWarning, spearmanr
 from sklearn.ensemble import ExtraTreesRegressor
 from sklearn.model_selection import TimeSeriesSplit
 
@@ -44,7 +46,7 @@ def _make_progress_callback(n_trials: int, label: str):
         bar = "#" * filled + "." * (_BAR_WIDTH - filled)
         best = study.best_value if study.best_trial else 0.0
         print(
-            f"\r    {label:<14} [{bar}] {done:>3}/{n_trials} | best Sortino={best:.4f}",
+            f"\r    {label:<14} [{bar}] {done:>3}/{n_trials} | best Spearman={best:.4f}",
             end="",
             flush=True,
         )
@@ -189,70 +191,55 @@ def _sortino_score(pnl_list: list[float], min_trades: int) -> float:
     return mean / downside_std
 
 
-def _cv_pnl_score(
+def _cv_spearman_score(
     model: Any,
     X: pd.DataFrame,
     y: pd.Series,
-    close_window: np.ndarray,
     cv: TimeSeriesSplit,
     trial: optuna.trial.Trial | None = None,
 ) -> float:
     """
-    Кросс-валидация с Sortino-метрикой: Sortino по всем сделкам из всех фолдов.
+    Кросс-валидация с метрикой Спирмена: средняя ранговая корреляция pnl_pred и реального P&L.
 
-    Собираем все P&L из всех фолдов в один список — это стабильнее чем
-    усреднять Sortino по фолдам (в каждом фолде мало сделок → шумно).
-    P&L включает комиссию и НДФЛ — точная реплика торговой логики scheduler.
+    Спирмен измеряет качество ранжирования барów — насколько порядок предсказаний
+    соответствует порядку реальных P&L. Не зависит от выбора порога входа и масштаба,
+    поэтому является чистой оценкой предсказательной силы модели.
 
-    При передаче trial — включается pruning: после каждого фолда промежуточный
-    Sortino репортится в Optuna. Если trial признаётся плохим (ниже медианы
-    завершённых trials на том же шаге) — поднимается TrialPruned и фолды
-    не досчитываются. Экономия: ~30% времени HPO на отброшенных trials.
+    Диапазон: [-1, 1]. Цель HPO — максимизировать.
+        1.0 = идеальный порядок, 0.0 = случайный, -1.0 = обратный.
+
+    При передаче trial — включается pruning: после каждого фолда промежуточная
+    корреляция репортится в Optuna. Явно плохие trials останавливаются досрочно.
 
     Аргументы:
-        model:        sklearn-совместимый регрессор.
-        X:            DataFrame признаков.
-        y:            Series целевых P&L значений (float).
-        close_window: матрица цен (N, lookahead+1), выровненная с X/y.
-        cv:           экземпляр TimeSeriesSplit.
-        trial:        Optuna trial для pruning (None = без pruning).
+        model:  sklearn-совместимый регрессор.
+        X:      DataFrame признаков.
+        y:      Series целевых P&L значений (float).
+        cv:     экземпляр TimeSeriesSplit.
+        trial:  Optuna trial для pruning (None = без pruning).
 
     Возвращает:
-        Sortino ratio по всем CV-сделкам. 0.0 если сделок меньше min_trades.
+        Средняя корреляция Спирмена по фолдам. nan → 0.0.
     """
-    all_pnl: list[float] = []
+    scores: list[float] = []
 
     for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X)):
         X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-        y_train = y.iloc[train_idx]
-        # Регрессор предсказывает ожидаемый net P&L для каждого бара.
-        # BUY  если предсказанный P&L >= 0 (ожидаем прибыль).
-        # SELL если предсказанный P&L  < 0 (ожидаем убыток → сигнал выхода).
+        y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
+
         pnl_pred = model.fit(X_train, y_train).predict(X_val)
-        y_pred = np.where(pnl_pred >= 0, 2, 1).astype(np.int8)
-        y_sell = (pnl_pred < 0).astype(np.int8)
+        # ConstantInputWarning возникает когда модель предсказывает константу — обрабатываем nan → 0.0
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ConstantInputWarning)
+            corr, _ = spearmanr(pnl_pred, y_val.values)
+        scores.append(float(corr) if not np.isnan(corr) else 0.0)
 
-        all_pnl.extend(_simulate_pnl(
-            y_pred=y_pred,
-            close_window=close_window[val_idx],
-            commission_pct=trading_settings.broker_commission_pct,
-            sl_pct=trading_settings.stop_loss_pct,
-            tp_pct=trading_settings.take_profit_pct,
-            lookahead=ml_settings.lookahead,
-            tax_pct=trading_settings.tax_pct,
-            y_sell=y_sell,
-        ))
-
-        # Pruning: репортим промежуточный Sortino после каждого фолда.
-        # MedianPruner сравнивает с медианой завершённых trials на том же шаге —
-        # явно плохие trials останавливаются не дожидаясь последнего фолда.
         if trial is not None:
-            intermediate = _sortino_score(all_pnl, min_trades=ml_settings.sharpe_min_trades)
-            trial.report(intermediate, step=fold_idx)
+            trial.report(float(np.mean(scores)), step=fold_idx)
             if trial.should_prune():
                 raise optuna.TrialPruned()
 
-    return _sortino_score(all_pnl, min_trades=ml_settings.sharpe_min_trades)
+    return float(np.mean(scores))
 
 
 # ── LightGBM ─────────────────────────────────────────────────────────────────
@@ -260,12 +247,14 @@ def _cv_pnl_score(
 def tune_lgbm(
     X: pd.DataFrame,
     y: pd.Series,
-    close_window: np.ndarray,
     n_trials: int | None = None,
     version: str | None = None,
 ) -> dict:
     """
     Подобрать гиперпараметры LightGBM-регрессора через Optuna.
+
+    Метрика HPO — средняя корреляция Спирмена между pnl_pred и реальным P&L.
+    alpha (квантильный уровень) тюнируется как обычный гиперпараметр [0.7, 0.95].
 
     Аргументы:
         X:        DataFrame признаков.
@@ -282,10 +271,15 @@ def tune_lgbm(
 
     def objective(trial: optuna.Trial) -> float:
         params = {
-            # regression_l1 (MAE) устойчивее к выбросам P&L (SL-хиты, TP-хиты),
-            # чем regression (MSE), которая штрафует большие отклонения квадратично.
-            "objective": "regression_l1",
-            "num_leaves": trial.suggest_int("num_leaves", 15, 255),
+            "objective": "quantile",
+            # alpha тюнируется: Optuna сам найдёт оптимальный квантильный уровень.
+            # Диапазон [0.7, 0.95]: ниже 0.7 — предсказываем медиану (~-0.006),
+            # выше 0.95 — слишком мало обучающих сигналов, нестабильно.
+            "alpha": trial.suggest_float("alpha", 0.7, 0.95),
+            "num_leaves": trial.suggest_int("num_leaves", 15, 127),
+            # max_depth ограничивает глубину leaf-wise дерева LightGBM.
+            # Без него num_leaves=127 может дать глубину >20 на шумных P&L-данных.
+            "max_depth": trial.suggest_int("max_depth", 4, 10),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "n_estimators": trial.suggest_int("n_estimators", 200, 1000),
             "subsample": trial.suggest_float("subsample", 0.6, 1.0),
@@ -293,7 +287,6 @@ def tune_lgbm(
             "subsample_freq": 1,
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
             "min_child_samples": trial.suggest_int("min_child_samples", 10, 50),
-            # Регуляризация — ключевые параметры для шумных финансовых данных
             "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 1.0),
             "reg_lambda": trial.suggest_float("reg_lambda", 0.0, 5.0),
             "min_split_gain": trial.suggest_float("min_split_gain", 0.0, 0.5),
@@ -301,22 +294,15 @@ def tune_lgbm(
             "verbose": -1,
             "n_jobs": -1,
         }
-        # LightGBM — дерево решений: StandardScaler не нужен (сплиты монотонны к масштабу)
         model = lgb.LGBMRegressor(**params)
-        return _cv_pnl_score(model, X, y, close_window, cv, trial=trial)
+        return _cv_spearman_score(model, X, y, cv, trial=trial)
 
-    # n_startup_trials=20: LightGBM имеет 9 параметров → нужно ~2–3x random trials
-    # перед тем как TPE начнёт строить суррогатную модель (дефолт 10 — слишком мало)
-    # seed: воспроизводимость HPO между запусками (--force-tune даёт те же результаты)
+    # n_startup_trials=25: LightGBM имеет 11 тюнируемых параметров (добавили alpha)
     sampler = optuna.samplers.TPESampler(
-        n_startup_trials=20,
+        n_startup_trials=25,
         seed=ml_settings.random_state,
     )
-    # MedianPruner: останавливает trial если его промежуточный Sortino
-    # хуже медианы завершённых trials на том же фолде.
-    # n_startup_trials=5: не прунить пока нет хотя бы 5 завершённых для медианы.
-    # n_warmup_steps=2: не прунить до фолда №2 (первые 2 фолда — нужно накопить P&L).
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=2)
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=25, n_warmup_steps=2)
     study = optuna.create_study(direction="maximize", sampler=sampler, pruner=pruner)
     study.optimize(
         objective,
@@ -326,8 +312,9 @@ def tune_lgbm(
     )
 
     best_params = study.best_params
+    # alpha уже в best_params (тюнировался как обычный параметр)
     best_params.update({
-        "objective": "regression_l1",
+        "objective": "quantile",
         "subsample_freq": 1,
         "random_state": ml_settings.random_state,
         "verbose": -1,
@@ -336,7 +323,7 @@ def tune_lgbm(
 
     logger.info(
         "LightGBM tuning complete",
-        best_sortino=round(study.best_value, 4),
+        best_spearman=round(study.best_value, 4),
         best_params=best_params,
     )
 
@@ -349,13 +336,13 @@ def tune_lgbm(
 def tune_extra_trees(
     X: pd.DataFrame,
     y: pd.Series,
-    close_window: np.ndarray,
     n_trials: int | None = None,
     version: str | None = None,
 ) -> dict:
     """
     Подобрать гиперпараметры ExtraTreesRegressor через Optuna.
 
+    Метрика HPO — средняя корреляция Спирмена между pnl_pred и реальным P&L.
     ExtraTrees использует случайные пороги разбиений (вместо лучших как в RF),
     что даёт низкую корреляцию с LightGBM и реальное разнообразие ансамблю.
 
@@ -375,29 +362,26 @@ def tune_extra_trees(
     def objective(trial: optuna.Trial) -> float:
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 100, 500),
-            # log2(8000 строк) ≈ 13 — деревья не вырастают глубже 13-15 на наших данных;
-            # max_depth > 18 даёт идентичный результат и тратит trials Optuna впустую
-            "max_depth": trial.suggest_int("max_depth", 5, 18),
+            # log2(8000 строк) ≈ 13 — деревья не вырастают глубже 13-15 на наших данных
+            "max_depth": trial.suggest_int("max_depth", 5, 15),
             "min_samples_split": trial.suggest_int("min_samples_split", 2, 20),
-            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 10),
-            # max_features: ET особенно чувствителен к этому параметру
+            # min_samples_leaf ≥ 3 — защита от меморизации шумных P&L-выбросов
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 3, 15),
             "max_features": trial.suggest_float("max_features", 0.3, 1.0),
-            # Разрезать узел только если снижение примеси >= порога — отсекает шумные разбиения
-            "min_impurity_decrease": trial.suggest_float("min_impurity_decrease", 0.0, 0.01),
+            # log-шкала: P&L-variance ≈ 1e-5, значения >1e-3 убивают все сплиты → константные предсказания
+            "min_impurity_decrease": trial.suggest_float("min_impurity_decrease", 1e-7, 1e-3, log=True),
             "random_state": ml_settings.random_state,
-            "n_jobs": -1,
+            # n_jobs=1: ET с n_jobs=-1 форкает все ядра — каждое копирует датасет → OOM на 2GB
+            "n_jobs": 1,
         }
-        # ExtraTrees — дерево решений: StandardScaler не влияет (сплиты монотонны к масштабу)
         model = ExtraTreesRegressor(**params)
-        return _cv_pnl_score(model, X, y, close_window, cv, trial=trial)
+        return _cv_spearman_score(model, X, y, cv, trial=trial)
 
-    # n_startup_trials=15: ExtraTrees имеет 6 параметров → нужно ~2–3x random trials
-    # seed: воспроизводимость HPO
     sampler = optuna.samplers.TPESampler(
         n_startup_trials=15,
         seed=ml_settings.random_state,
     )
-    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=2)
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=15, n_warmup_steps=2)
     study = optuna.create_study(direction="maximize", sampler=sampler, pruner=pruner)
     study.optimize(
         objective,
@@ -407,15 +391,95 @@ def tune_extra_trees(
     )
 
     best_params = study.best_params
-    best_params.update({"random_state": ml_settings.random_state, "n_jobs": -1})
+    best_params.update({
+        "random_state": ml_settings.random_state,
+        "n_jobs": 1,
+    })
 
     logger.info(
         "ExtraTrees tuning complete",
-        best_sortino=round(study.best_value, 4),
+        best_spearman=round(study.best_value, 4),
         best_params=best_params,
     )
 
     _save_params(best_params, f"best_params_et_{version}.json")
+    return best_params
+
+
+# ── HistGradientBoosting ──────────────────────────────────────────────────────
+
+def tune_hist_gbm(
+    X: pd.DataFrame,
+    y: pd.Series,
+    n_trials: int | None = None,
+    version: str | None = None,
+) -> dict:
+    """
+    Подобрать гиперпараметры HistGradientBoostingRegressor через Optuna.
+
+    Метрика HPO — средняя корреляция Спирмена между pnl_pred и реальным P&L.
+    HistGBM — sklearn histogram-based бустинг (аналог LGBM), third objective в ансамбле:
+        LGBM       → quantile(alpha)  — тюнируемый квантиль P&L
+        ExtraTrees → MSE (mean)       — среднее P&L
+        HistGBM    → MAE (median)     — медиана P&L
+
+    Аргументы:
+        X:        DataFrame признаков.
+        y:        Series целевых P&L значений (float).
+        n_trials: количество итераций (None = из ml_settings).
+        version:  версия для имени файла (None = из ml_settings).
+
+    Возвращает:
+        Словарь лучших гиперпараметров.
+    """
+    from sklearn.ensemble import HistGradientBoostingRegressor as HGBR
+    n_trials = n_trials or ml_settings.optuna_trials_hist_gbm
+    version = version or ml_settings.model_version
+    cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
+
+    def objective(trial: optuna.Trial) -> float:
+        params = {
+            # MAE (медиана): третий независимый objective после quantile и MSE
+            "loss": "absolute_error",
+            "max_iter": trial.suggest_int("max_iter", 100, 500),
+            "max_leaf_nodes": trial.suggest_int("max_leaf_nodes", 15, 127),
+            "max_depth": trial.suggest_int("max_depth", 3, 10),
+            # min_samples_leaf — защита от меморизации P&L-выбросов
+            "min_samples_leaf": trial.suggest_int("min_samples_leaf", 5, 30),
+            "l2_regularization": trial.suggest_float("l2_regularization", 0.0, 5.0),
+            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
+            "random_state": ml_settings.random_state,
+            # HistGBM не поддерживает n_jobs
+        }
+        model = HGBR(**params)
+        return _cv_spearman_score(model, X, y, cv, trial=trial)
+
+    sampler = optuna.samplers.TPESampler(
+        n_startup_trials=15,
+        seed=ml_settings.random_state,
+    )
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=15, n_warmup_steps=2)
+    study = optuna.create_study(direction="maximize", sampler=sampler, pruner=pruner)
+    study.optimize(
+        objective,
+        n_trials=n_trials,
+        show_progress_bar=False,
+        callbacks=[_make_progress_callback(n_trials, "HistGBM HPO")],
+    )
+
+    best_params = study.best_params
+    best_params.update({
+        "loss": "absolute_error",
+        "random_state": ml_settings.random_state,
+    })
+
+    logger.info(
+        "HistGBM tuning complete",
+        best_spearman=round(study.best_value, 4),
+        best_params=best_params,
+    )
+
+    _save_params(best_params, f"best_params_hist_gbm_{version}.json")
     return best_params
 
 
