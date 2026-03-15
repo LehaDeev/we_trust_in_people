@@ -55,13 +55,21 @@ def _format_signal(result: dict) -> str:
     volume_suffix = f"  {volume_mark}" if volume_min > 1.0 else ""
 
     emoji = _SIGNAL_EMOJI.get(signal, "⚪")
-    conf_sign = "+" if confidence >= 0 else ""
-    thr_sign = "+" if threshold >= 0 else ""
+
+    # Процент от порога: насколько текущий сигнал близок к срабатыванию
+    if threshold != 0:
+        pct_of_threshold = confidence / threshold * 100
+    else:
+        pct_of_threshold = 100.0 if confidence >= 0 else 0.0
+    gap = confidence - threshold
+    gap_sign = "+" if gap >= 0 else ""
+    gap_line = "Порог пройден" if passes_threshold else f"До порога: <b>{gap * 100:.2f}%</b>"
 
     lines = [
         f"📈 <b>{ticker}</b>",
         f"Сигнал:   {emoji} <b>{signal}</b>",
-        f"P&L пред: <b>{conf_sign}{confidence * 100:.3f}%</b>  |  порог: {thr_sign}{threshold * 100:.3f}%  {threshold_mark}",
+        f"Ранг:     <b>{pct_of_threshold:.0f}%</b> от порога  {threshold_mark}",
+        gap_line,
         f"Объём:    <b>{volume_ratio:.2f}×</b> среднего{volume_suffix}",
     ]
     return "\n".join(lines)
