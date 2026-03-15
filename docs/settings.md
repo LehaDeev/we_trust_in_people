@@ -28,14 +28,14 @@
 | Переменная | Описание | По умолчанию |
 |---|---|---|
 | `ML_MODEL_VERSION` | Суффикс файлов весов | `v2` |
-| `ML_LOOKAHEAD` | Свечей вперёд для генерации меток | `8` |
-| `ML_THRESHOLD` | Порог доходности ±% для BUY/SELL | `0.007` |
-| `ML_THRESHOLD_N_TRIALS` | Итераций Optuna для подбора порога уверенности per-ticker | `50` |
+| `ML_LOOKAHEAD` | Горизонт удержания позиции при генерации целевых P&L значений (свечей) | `4` |
+| `ML_THRESHOLD` | Fallback порог входа (предсказанный net P&L); per-ticker оптимизируется Optuna → `best_threshold_*.json` | `0.0` |
+| `ML_THRESHOLD_N_TRIALS` | Итераций Optuna для подбора порога входа per-ticker | `50` |
 | `ML_SHARPE_MIN_TRADES` | Минимум сделок для расчёта Sharpe ratio (меньше — штраф 0.0) | `10` |
 | `ML_N_SPLITS` | Фолдов TimeSeriesSplit при кросс-валидации | `5` |
 | `ML_RANDOM_STATE` | Seed для воспроизводимости (Optuna, ExtraTrees) | `42` |
 | `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `75` |
-| `ML_OPTUNA_TRIALS_ET` | Итераций Optuna для ExtraTreesClassifier | `40` |
+| `ML_OPTUNA_TRIALS_ET` | Итераций Optuna для ExtraTreesRegressor | `40` |
 | `ML_FEATURE_IMPORTANCE_THRESHOLD` | Порог importance для отбора признаков per-ticker (`0.0` = отключить) | `0.01` |
 | `ML_PRINT_FEATURE_IMPORTANCE` | Выводить таблицу важности признаков после обучения | `false` |
 | `ML_FORCE_TUNE` | Принудительный перезапуск Optuna | `false` |
@@ -72,7 +72,7 @@
 | Переменная | Описание | По умолчанию |
 |---|---|---|
 | `TRADING_ENABLED` | Включить автоторговлю | `false` |
-| `TRADING_CONFIDENCE_THRESHOLD` | Мин. уверенность модели для BUY | `0.65` |
+| `TRADING_CONFIDENCE_THRESHOLD` | Fallback мин. предсказанный net P&L для открытия позиции (per-ticker задаётся Optuna в `best_threshold_*.json`) | `0.0` |
 | `TRADING_LOTS_PER_TICKER` | Лотов на каждую сделку | `1` |
 | `TRADING_STOP_LOSS_PCT` | Целевой чистый убыток для стоп-лосса (после комиссий) | `0.03` |
 | `TRADING_TAKE_PROFIT_PCT` | Целевая чистая прибыль для тейк-профита (после комиссий и НДФЛ) | `0.05` |
