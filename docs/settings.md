@@ -32,9 +32,10 @@
 | `ML_THRESHOLD` | Порог доходности ±% для BUY/SELL | `0.007` |
 | `ML_THRESHOLD_N_TRIALS` | Итераций Optuna для подбора порога уверенности per-ticker | `50` |
 | `ML_SHARPE_MIN_TRADES` | Минимум сделок для расчёта Sharpe ratio (меньше — штраф 0.0) | `10` |
-| `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `50` |
-| `ML_OPTUNA_TRIALS_ET` | Итераций Optuna для ExtraTreesClassifier | `30` |
-| `ML_OPTUNA_TRIALS_SVC` | Итераций Optuna для SVC (Platt scaling — держать ≤ 20) | `20` |
+| `ML_N_SPLITS` | Фолдов TimeSeriesSplit при кросс-валидации | `5` |
+| `ML_RANDOM_STATE` | Seed для воспроизводимости (Optuna, ExtraTrees) | `42` |
+| `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `75` |
+| `ML_OPTUNA_TRIALS_ET` | Итераций Optuna для ExtraTreesClassifier | `40` |
 | `ML_FEATURE_IMPORTANCE_THRESHOLD` | Порог importance для отбора признаков per-ticker (`0.0` = отключить) | `0.01` |
 | `ML_PRINT_FEATURE_IMPORTANCE` | Выводить таблицу важности признаков после обучения | `false` |
 | `ML_FORCE_TUNE` | Принудительный перезапуск Optuna | `false` |

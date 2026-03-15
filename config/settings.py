@@ -133,13 +133,9 @@ class MLSettings(BaseSettings):
     # Меньше — возвращает 0.0 (штраф моделям с редкими BUY-сигналами).
     sharpe_min_trades: int = Field(10, alias="ML_SHARPE_MIN_TRADES")
 
-    # Количество итераций Optuna для каждой модели
+    # Количество итераций Optuna для каждой модели ансамбля
     optuna_trials_lgbm: int = Field(25, alias="ML_OPTUNA_TRIALS_LGBM")
-    optuna_trials_xgb: int = Field(25, alias="ML_OPTUNA_TRIALS_XGB")
     optuna_trials_et: int = Field(15, alias="ML_OPTUNA_TRIALS_ET")
-    # SVC медленнее деревьев из-за Platt scaling — держать <= 20 трайлов
-    optuna_trials_svc: int = Field(20, alias="ML_OPTUNA_TRIALS_SVC")
-    optuna_trials_catboost: int = Field(30, alias="ML_OPTUNA_TRIALS_CATBOOST")
 
     # Минимум свечей для инференса (50 прогрев + 200 буфер)
     min_candles_predict: int = Field(250, alias="ML_MIN_CANDLES_PREDICT")

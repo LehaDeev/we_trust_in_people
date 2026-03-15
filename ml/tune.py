@@ -16,12 +16,8 @@ import lightgbm as lgb
 import numpy as np
 import optuna
 import pandas as pd
-import xgboost as xgb
 from sklearn.ensemble import ExtraTreesClassifier
-from sklearn.svm import SVC
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 
 from config.settings import ml_settings, trading_settings
 from utils.logger import logger
@@ -165,6 +161,7 @@ def _cv_pnl_score(
     y: pd.Series,
     close_window: np.ndarray,
     cv: TimeSeriesSplit,
+    trial: optuna.trial.Trial | None = None,
 ) -> float:
     """
     Кросс-валидация с Sortino-метрикой: Sortino по всем сделкам из всех фолдов.
@@ -173,19 +170,25 @@ def _cv_pnl_score(
     усреднять Sortino по фолдам (в каждом фолде мало сделок → шумно).
     P&L включает комиссию и НДФЛ — точная реплика торговой логики scheduler.
 
+    При передаче trial — включается pruning: после каждого фолда промежуточный
+    Sortino репортится в Optuna. Если trial признаётся плохим (ниже медианы
+    завершённых trials на том же шаге) — поднимается TrialPruned и фолды
+    не досчитываются. Экономия: ~30% времени HPO на отброшенных trials.
+
     Аргументы:
         model:        sklearn-совместимый классификатор.
         X:            DataFrame признаков.
         y:            Series меток.
         close_window: матрица цен (N, lookahead+1), выровненная с X/y.
         cv:           экземпляр TimeSeriesSplit.
+        trial:        Optuna trial для pruning (None = без pruning).
 
     Возвращает:
         Sortino ratio по всем CV-сделкам. 0.0 если сделок меньше min_trades.
     """
     all_pnl: list[float] = []
 
-    for train_idx, val_idx in cv.split(X):
+    for fold_idx, (train_idx, val_idx) in enumerate(cv.split(X)):
         X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
         y_train = y.iloc[train_idx]
         # predict_proba + порог 0.5 вместо argmax:
@@ -203,6 +206,15 @@ def _cv_pnl_score(
             lookahead=ml_settings.lookahead,
             tax_pct=trading_settings.tax_pct,
         ))
+
+        # Pruning: репортим промежуточный Sortino после каждого фолда.
+        # MedianPruner сравнивает с медианой завершённых trials на том же шаге —
+        # явно плохие trials останавливаются не дожидаясь последнего фолда.
+        if trial is not None:
+            intermediate = _sortino_score(all_pnl, min_trades=ml_settings.sharpe_min_trades)
+            trial.report(intermediate, step=fold_idx)
+            if trial.should_prune():
+                raise optuna.TrialPruned()
 
     return _sortino_score(all_pnl, min_trades=ml_settings.sharpe_min_trades)
 
@@ -236,21 +248,40 @@ def tune_lgbm(
         params = {
             "objective": "multiclass",
             "num_class": 3,
-            "num_leaves": trial.suggest_int("num_leaves", 15, 127),
+            "num_leaves": trial.suggest_int("num_leaves", 15, 255),
             "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
             "n_estimators": trial.suggest_int("n_estimators", 200, 1000),
             "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+            # subsample_freq > 0 обязателен — иначе subsample игнорируется LightGBM
+            "subsample_freq": 1,
             "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
             "min_child_samples": trial.suggest_int("min_child_samples", 10, 50),
+            # Регуляризация — ключевые параметры для шумных финансовых данных
+            "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 1.0),       # L1: обнуляет слабые признаки
+            "reg_lambda": trial.suggest_float("reg_lambda", 0.0, 5.0),     # L2: сглаживает веса
+            "min_split_gain": trial.suggest_float("min_split_gain", 0.0, 0.5),  # минимальный прирост для разбиения
             "random_state": ml_settings.random_state,
             "verbose": -1,
             "n_jobs": -1,
             "class_weight": "balanced",
         }
-        model = Pipeline([("scaler", StandardScaler()), ("model", lgb.LGBMClassifier(**params))])
-        return _cv_pnl_score(model, X, y, close_window, cv)
+        # LightGBM — дерево решений: StandardScaler не нужен (сплиты монотонны к масштабу)
+        model = lgb.LGBMClassifier(**params)
+        return _cv_pnl_score(model, X, y, close_window, cv, trial=trial)
 
-    study = optuna.create_study(direction="maximize")
+    # n_startup_trials=20: LightGBM имеет 9 параметров → нужно ~2–3x random trials
+    # перед тем как TPE начнёт строить суррогатную модель (дефолт 10 — слишком мало)
+    # seed: воспроизводимость HPO между запусками (--force-tune даёт те же результаты)
+    sampler = optuna.samplers.TPESampler(
+        n_startup_trials=20,
+        seed=ml_settings.random_state,
+    )
+    # MedianPruner: останавливает trial если его промежуточный Sortino
+    # хуже медианы завершённых trials на том же фолде.
+    # n_startup_trials=5: не прунить пока нет хотя бы 5 завершённых для медианы.
+    # n_warmup_steps=2: не прунить до фолда №2 (первые 2 фолда — нужно накопить P&L).
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=2)
+    study = optuna.create_study(direction="maximize", sampler=sampler, pruner=pruner)
     study.optimize(
         objective,
         n_trials=n_trials,
@@ -262,8 +293,10 @@ def tune_lgbm(
     best_params.update({
         "objective": "multiclass",
         "num_class": 3,
+        "subsample_freq": 1,  # обязателен чтобы subsample реально применялся
         "random_state": ml_settings.random_state,
         "verbose": -1,
+        "n_jobs": -1,
         "class_weight": "balanced",
     })
 
@@ -277,75 +310,7 @@ def tune_lgbm(
     return best_params
 
 
-# ── XGBoost ──────────────────────────────────────────────────────────────────
-
-def tune_xgboost(
-    X: pd.DataFrame,
-    y: pd.Series,
-    n_trials: int | None = None,
-    version: str | None = None,
-) -> dict:
-    """
-    Подобрать гиперпараметры XGBoost через Optuna.
-
-    Аргументы:
-        X:        DataFrame признаков.
-        y:        Series меток (0, 1, 2).
-        n_trials: количество итераций (None = из ml_settings).
-        version:  версия для имени файла (None = из ml_settings).
-
-    Возвращает:
-        Словарь лучших гиперпараметров.
-    """
-    n_trials = n_trials or ml_settings.optuna_trials_xgb
-    version = version or ml_settings.model_version
-    cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
-
-    def objective(trial: optuna.Trial) -> float:
-        params = {
-            "objective": "multi:softprob",
-            "num_class": 3,
-            "max_depth": trial.suggest_int("max_depth", 3, 10),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-            "n_estimators": trial.suggest_int("n_estimators", 200, 1000),
-            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-            "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-            "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
-            "random_state": ml_settings.random_state,
-            "verbosity": 0,
-            "eval_metric": "mlogloss",
-        }
-        model = Pipeline([("scaler", StandardScaler()), ("model", xgb.XGBClassifier(**params))])
-        return _cv_f1_score(model, X, y, cv)
-
-    study = optuna.create_study(direction="maximize")
-    study.optimize(
-        objective,
-        n_trials=n_trials,
-        show_progress_bar=False,
-        callbacks=[_make_progress_callback(n_trials, "XGBoost HPO")],
-    )
-
-    best_params = study.best_params
-    best_params.update({
-        "objective": "multi:softprob",
-        "num_class": 3,
-        "random_state": ml_settings.random_state,
-        "verbosity": 0,
-        "eval_metric": "mlogloss",
-    })
-
-    logger.info(
-        "XGBoost tuning complete",
-        best_f1=round(study.best_value, 4),
-        best_params=best_params,
-    )
-
-    _save_params(best_params, f"best_params_xgboost_{version}.json")
-    return best_params
-
-
-# ── Random Forest ─────────────────────────────────────────────────────────────
+# ── ExtraTrees ────────────────────────────────────────────────────────────────
 
 def tune_extra_trees(
     X: pd.DataFrame,
@@ -376,19 +341,31 @@ def tune_extra_trees(
     def objective(trial: optuna.Trial) -> float:
         params = {
             "n_estimators": trial.suggest_int("n_estimators", 100, 500),
-            "max_depth": trial.suggest_int("max_depth", 5, 30),
+            # log2(8000 строк) ≈ 13 — деревья не вырастают глубже 13-15 на наших данных;
+            # max_depth > 18 даёт идентичный результат и тратит trials Optuna впустую
+            "max_depth": trial.suggest_int("max_depth", 5, 18),
             "min_samples_split": trial.suggest_int("min_samples_split", 2, 20),
             "min_samples_leaf": trial.suggest_int("min_samples_leaf", 1, 10),
             # max_features: ET особенно чувствителен к этому параметру
             "max_features": trial.suggest_float("max_features", 0.3, 1.0),
+            # Разрезать узел только если снижение примеси >= порога — отсекает шумные разбиения
+            "min_impurity_decrease": trial.suggest_float("min_impurity_decrease", 0.0, 0.01),
             "random_state": ml_settings.random_state,
             "n_jobs": -1,
             "class_weight": "balanced",
         }
-        model = Pipeline([("scaler", StandardScaler()), ("model", ExtraTreesClassifier(**params))])
-        return _cv_pnl_score(model, X, y, close_window, cv)
+        # ExtraTrees — дерево решений: StandardScaler не влияет (сплиты монотонны к масштабу)
+        model = ExtraTreesClassifier(**params)
+        return _cv_pnl_score(model, X, y, close_window, cv, trial=trial)
 
-    study = optuna.create_study(direction="maximize")
+    # n_startup_trials=15: ExtraTrees имеет 6 параметров → нужно ~2–3x random trials
+    # seed: воспроизводимость HPO
+    sampler = optuna.samplers.TPESampler(
+        n_startup_trials=15,
+        seed=ml_settings.random_state,
+    )
+    pruner = optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=2)
+    study = optuna.create_study(direction="maximize", sampler=sampler, pruner=pruner)
     study.optimize(
         objective,
         n_trials=n_trials,
@@ -406,149 +383,6 @@ def tune_extra_trees(
     )
 
     _save_params(best_params, f"best_params_et_{version}.json")
-    return best_params
-
-
-def tune_svc(
-    X: pd.DataFrame,
-    y: pd.Series,
-    n_trials: int | None = None,
-    version: str | None = None,
-) -> dict:
-    """
-    Подобрать гиперпараметры SVC через Optuna.
-
-    SVC (RBF-ядро) — принципиально иной алгоритм: максимизирует отступ между
-    классами в пространстве признаков, а не строит деревья решений. Даёт
-    реальное разнообразие ансамблю с LGBM и ExtraTrees.
-
-    Внимание: probability=True включает Platt scaling (внутренняя CV SVC),
-    что существенно замедляет обучение. На 7000+ строк каждый трайл занимает
-    ~1–2 минуты — держать ML_OPTUNA_TRIALS_SVC <= 20.
-
-    Аргументы:
-        X:        DataFrame признаков.
-        y:        Series меток (0, 1, 2).
-        n_trials: количество итераций (None = из ml_settings).
-        version:  версия для имени файла (None = из ml_settings).
-
-    Возвращает:
-        Словарь лучших гиперпараметров.
-    """
-    n_trials = n_trials or ml_settings.optuna_trials_svc
-    version = version or ml_settings.model_version
-    cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
-
-    def objective(trial: optuna.Trial) -> float:
-        params = {
-            # C: штраф за ошибку классификации; выше → жёстче границы, меньше → шире отступ
-            "C": trial.suggest_float("C", 0.01, 100.0, log=True),
-            # gamma: ширина RBF-ядра; scale = 1/(n_features * X.var()) — хорошая отправная точка
-            "gamma": trial.suggest_categorical("gamma", ["scale", "auto"]),
-            "kernel": "rbf",
-            "probability": True,   # нужно для soft voting (predict_proba)
-            "class_weight": "balanced",
-            "random_state": ml_settings.random_state,
-        }
-        model = Pipeline([("scaler", StandardScaler()), ("model", SVC(**params))])
-        return _cv_f1_score(model, X, y, cv)
-
-    study = optuna.create_study(direction="maximize")
-    study.optimize(
-        objective,
-        n_trials=n_trials,
-        show_progress_bar=False,
-        callbacks=[_make_progress_callback(n_trials, "SVC HPO")],
-    )
-
-    best_params = study.best_params
-    best_params.update({
-        "kernel": "rbf",
-        "probability": True,
-        "class_weight": "balanced",
-        "random_state": ml_settings.random_state,
-    })
-
-    logger.info(
-        "SVC tuning complete",
-        best_f1=round(study.best_value, 4),
-        best_params=best_params,
-    )
-
-    _save_params(best_params, f"best_params_svc_{version}.json")
-    return best_params
-
-
-# ── CatBoost ──────────────────────────────────────────────────────────────────
-
-def tune_catboost(
-    X: pd.DataFrame,
-    y: pd.Series,
-    n_trials: int | None = None,
-    version: str | None = None,
-) -> dict:
-    """
-    Подобрать гиперпараметры CatBoost через Optuna.
-
-    Аргументы:
-        X:        DataFrame признаков.
-        y:        Series меток (0, 1, 2).
-        n_trials: количество итераций (None = из ml_settings).
-        version:  версия для имени файла (None = из ml_settings).
-
-    Возвращает:
-        Словарь лучших гиперпараметров.
-    """
-    from catboost import CatBoostClassifier  # ленивый импорт — catboost опциональная зависимость
-
-    n_trials = n_trials or ml_settings.optuna_trials_catboost
-    version = version or ml_settings.model_version
-    cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
-
-    def objective(trial: optuna.Trial) -> float:
-        params = {
-            "iterations": trial.suggest_int("iterations", 200, 1000),
-            "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-            "depth": trial.suggest_int("depth", 4, 10),
-            "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 10.0),
-            # subsample поддерживается только при bootstrap_type="Bernoulli" или "MVS"
-            # (по умолчанию "Bayesian" не поддерживает subsample → CatBoostError)
-            "bootstrap_type": "Bernoulli",
-            "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-            "random_strength": trial.suggest_float("random_strength", 0.1, 10.0, log=True),
-            "random_seed": ml_settings.random_state,
-            "verbose": 0,
-            # CatBoost поддерживает балансировку классов нативно
-            "auto_class_weights": "Balanced",
-            "loss_function": "MultiClass",
-        }
-        model = Pipeline([("scaler", StandardScaler()), ("model", CatBoostClassifier(**params))])
-        return _cv_f1_score(model, X, y, cv)
-
-    study = optuna.create_study(direction="maximize")
-    study.optimize(
-        objective,
-        n_trials=n_trials,
-        show_progress_bar=False,
-        callbacks=[_make_progress_callback(n_trials, "CatBoost HPO")],
-    )
-
-    best_params = study.best_params
-    best_params.update({
-        "bootstrap_type": "Bernoulli",
-        "random_seed": ml_settings.random_state,
-        "verbose": 0,
-        "auto_class_weights": "Balanced",
-        "loss_function": "MultiClass",
-    })
-
-    logger.info(
-        "CatBoost tuning complete",
-        best_f1=round(study.best_value, 4),
-        best_params=best_params,
-    )
-
-    _save_params(best_params, f"best_params_catboost_{version}.json")
     return best_params
 
 

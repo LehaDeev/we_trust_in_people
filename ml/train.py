@@ -28,8 +28,6 @@ import optuna
 import pandas as pd
 from sklearn.ensemble import ExtraTreesClassifier, VotingClassifier
 from sklearn.model_selection import TimeSeriesSplit
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
 from config.settings import data_settings, ml_settings
 from ml.dataset import load_all_tickers_from_csv, load_ticker_data, load_usdrub_data, merge_usdrub
 from ml.features import FEATURE_COLUMNS, compute_features
@@ -349,8 +347,14 @@ def _optimize_threshold(
         )
         return _sortino_score(pnl_list, min_trades=ml_settings.sharpe_min_trades)
 
-    study = optuna.create_study(direction="maximize")
+    # Threshold — 1 непрерывный параметр: n_startup_trials=5 достаточно
+    # (дефолт 10 — избыточно для 1D), seed — воспроизводимость
+    sampler = optuna.samplers.TPESampler(
+        n_startup_trials=5,
+        seed=ml_settings.random_state,
+    )
     optuna.logging.set_verbosity(optuna.logging.WARNING)
+    study = optuna.create_study(direction="maximize", sampler=sampler)
     study.optimize(objective, n_trials=ml_settings.threshold_n_trials, show_progress_bar=False)
 
     best = study.best_params["threshold"]
@@ -410,7 +414,6 @@ def _train_single_ticker(
     lgbm_params["class_weight"] = "balanced"
     et_params["class_weight"]   = "balanced"
 
-    # Каждая базовая модель обёрнута в Pipeline со StandardScaler.
     # VotingClassifier(voting='soft') усредняет предсказанные вероятности базовых моделей.
     # Два принципиально разных алгоритма:
     #   LGBM       — градиентный бустинг деревьев
@@ -419,13 +422,12 @@ def _train_single_ticker(
     # StackingClassifier не подходит для временных рядов: его внутренний cv=StratifiedKFold
     # перемешивает данные → утечка будущего в OOF → мета-модель деградирует на TimeSeriesSplit.
     def _make_ensemble() -> VotingClassifier:
-        def _scaled(name: str, model) -> tuple:
-            return (name, Pipeline([("scaler", StandardScaler()), ("model", model)]))
-
+        # Оба алгоритма — деревья решений: StandardScaler не влияет на результат,
+        # т.к. сплиты монотонны к масштабу признаков. Убрано для экономии вычислений.
         return VotingClassifier(
             estimators=[
-                _scaled("lgbm", lgb.LGBMClassifier(**lgbm_params)),
-                _scaled("et", ExtraTreesClassifier(**et_params)),
+                ("lgbm", lgb.LGBMClassifier(**lgbm_params)),
+                ("et", ExtraTreesClassifier(**et_params)),
             ],
             voting="soft",
             n_jobs=1,  # последовательный фит — меньше RAM на слабом сервере
