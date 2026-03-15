@@ -72,7 +72,7 @@ def _simulate_pnl(
     Порядок выхода по приоритету (соответствует реальной торговой логике бота):
         1. SL — аварийный стоп (жёсткий, не перебивается SELL-сигналом)
         2. TP — фиксация прибыли (жёсткий)
-        3. SELL-сигнал модели — основной выход при нормальной работе
+        3. SELL-сигнал модели — только если net PnL > 0 (зеркалит scheduler.py)
         4. конец окна lookahead — принудительный выход
 
     P&L рассчитывается как чистый результат после комиссии и НДФЛ:
@@ -80,6 +80,10 @@ def _simulate_pnl(
         commission = 2 × commission_pct  (вход + выход)
         tax = max(0, (gross - commission) × tax_pct)  — только на прибыль
         net = gross - commission - tax
+
+    SELL-выход: зеркалит логику scheduler.py — позиция закрывается по SELL-сигналу
+    только если чистый P&L > 0 (breakdown.is_profitable). При убыточной позиции
+    SELL-сигнал игнорируется: ждём восстановления, SL или конца окна.
 
     Аргументы:
         y_pred:         предсказанные классы (0=SELL, 1=HOLD, 2=BUY). Используется для входа.
@@ -113,31 +117,40 @@ def _simulate_pnl(
         # из trading/profitability.py. Это обеспечивает согласованность симуляции с реальной торговлей:
         #   SL: выход при net_loss = sl_pct  → gross trigger ≈ sl_pct - 2×commission  (меньше sl_pct)
         #   TP: выход при net_profit = tp_pct → gross trigger ≈ tp_pct + 2×commission + tax (больше tp_pct)
-        c = commission_pct
-        t = tax_pct
-        sl_price = entry * (1.0 + c - sl_pct) / (1.0 - c)
-        tp_price = entry * ((1.0 + c) + tp_pct / (max(1.0 - t, 1e-9))) / (1.0 - c)
+        sl_price = entry * (1.0 + commission_pct - sl_pct) / (1.0 - commission_pct)
+        tp_price = entry * ((1.0 + commission_pct) + tp_pct / (max(1.0 - tax_pct, 1e-9))) / (1.0 - commission_pct)
         exit_price = float(close_window[i, lookahead])
+        exit_j = lookahead  # фактический бар выхода (для расчёта next_available)
 
         for j in range(1, lookahead + 1):
-            c = float(close_window[i, j])
+            price_j = float(close_window[i, j])
             # SL и TP — жёсткие стопы, имеют приоритет над SELL-сигналом
-            if c <= sl_price:
+            if price_j <= sl_price:
                 exit_price = sl_price
+                exit_j = j
                 break
-            if c >= tp_price:
+            if price_j >= tp_price:
                 exit_price = tp_price
+                exit_j = j
                 break
-            # SELL-сигнал модели: основной выход, если SL/TP не сработали
+            # SELL-сигнал: выходим только если позиция прибыльна (зеркалит scheduler.py).
+            # Убыточная позиция удерживается — ждём восстановления, SL или конца окна.
             if y_sell is not None and i + j < n and y_sell[i + j]:
-                exit_price = c
-                break
+                gross_now = (price_j - entry) / entry
+                comm = 2.0 * commission_pct
+                net_now = gross_now - comm - max(0.0, (gross_now - comm) * tax_pct)
+                if net_now > 0:
+                    exit_price = price_j
+                    exit_j = j
+                    break
 
         gross = (exit_price - entry) / entry
         commission = 2.0 * commission_pct
         tax = max(0.0, (gross - commission) * tax_pct)
         pnl_list.append(gross - commission - tax)
-        next_available = i + lookahead
+        # Следующая сделка доступна сразу после фактического выхода (не конца lookahead-окна).
+        # Это отражает реальное поведение бота: после закрытия позиции можно войти снова.
+        next_available = i + exit_j + 1
 
     return pnl_list
 
