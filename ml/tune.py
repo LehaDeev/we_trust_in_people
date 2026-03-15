@@ -188,7 +188,11 @@ def _cv_pnl_score(
     for train_idx, val_idx in cv.split(X):
         X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
         y_train = y.iloc[train_idx]
-        y_pred = model.fit(X_train, y_train).predict(X_val)
+        # predict_proba + порог 0.5 вместо argmax:
+        # argmax с balanced классами → BUY на ~33% баров (слишком агрессивно),
+        # порог 0.5 → BUY только когда модель уверена сильнее случайного выбора.
+        proba = model.fit(X_train, y_train).predict_proba(X_val)
+        y_pred = np.where(proba[:, 2] >= 0.5, 2, 1)
 
         all_pnl.extend(_simulate_pnl(
             y_pred=y_pred,

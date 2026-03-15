@@ -482,23 +482,30 @@ def _train_single_ticker(
         cv_f1 = _evaluate_ensemble(ensemble, X_final, y, close_window, ticker)
         _print_ok(f"F1={cv_f1:.4f}")
 
+    # ── Оптимизация порога уверенности per-ticker ─────────────────────────────
+    # Порог оптимизируется ДО финального фита: временный ансамбль обучается на
+    # первых 80% данных, holdout (последние 20%) модель ещё не видела → нет утечки.
+    # Финальный ансамбль затем переобучается на всех данных.
+    _print_step("Оптимизация порога уверенности (Optuna)...")
+    val_size = max(ml_settings.sharpe_min_trades * 2, int(len(X_final) * 0.2))
+    X_th_train = X_final.iloc[:-val_size]
+    y_th_train = y.iloc[:-val_size]
+    X_th_val   = X_final.iloc[-val_size:]
+    y_th_val   = y.values[-val_size:]
+    cw_val     = close_window[-val_size:]
+    th_ensemble = _make_ensemble()
+    th_ensemble.fit(X_th_train, y_th_train)
+    best_threshold = _optimize_threshold(th_ensemble, X_th_val, y_th_val, cw_val, ticker)
+    del th_ensemble
+    gc.collect()
+    _print_ok(f"threshold={best_threshold:.4f}")
+
     _print_step("Финальное обучение ансамбля...")
     ensemble.fit(X_final, y)
     _print_ok()
 
     if ml_settings.print_feature_importance:
         _print_feature_importance(ensemble, selected_features, ticker)
-
-    # ── Оптимизация порога уверенности per-ticker ─────────────────────────────
-    # Используем последние 20% данных как holdout для подбора threshold.
-    # Небольшая утечка допустима: порог — скаляр, не веса модели.
-    _print_step("Оптимизация порога уверенности (Optuna)...")
-    val_size = max(1, int(len(X_final) * 0.2))
-    X_val = X_final.iloc[-val_size:]
-    y_val = y.values[-val_size:]
-    cw_val = close_window[-val_size:]
-    best_threshold = _optimize_threshold(ensemble, X_val, y_val, cw_val, ticker)
-    _print_ok(f"threshold={best_threshold:.4f}")
 
     threshold_path = WEIGHTS_DIR / f"best_threshold_{ticker_version}.json"
     with open(threshold_path, "w") as f:
