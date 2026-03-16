@@ -152,13 +152,15 @@ class RetrainScheduler:
             results_path = Path("ml/weights/last_results.json")
             with open(results_path) as f:
                 data = json.load(f)
-            # sortino_scores — новый ключ; f1_scores — fallback для совместимости
-            sortino_scores: dict[str, float] = (
-                data.get("sortino_scores") or data.get("f1_scores", {})
+            # spearman_scores — актуальный ключ; sortino_scores/f1_scores — fallback
+            spearman_scores: dict[str, float] = (
+                data.get("spearman_scores")
+                or data.get("sortino_scores")
+                or data.get("f1_scores", {})
             )
             failed: list[str] = data.get("failed", [])
             results = {ticker: Path(f"ml/weights/ensemble_{ticker}_{ml_settings.model_version}.pkl")
-                       for ticker in sortino_scores}
+                       for ticker in spearman_scores}
 
             # Шаг 4: сброс in-memory кеша — следующий predict загрузит новые веса
             clear_model_cache()
@@ -167,7 +169,7 @@ class RetrainScheduler:
             await notify_retrain_done(results, failed)
             logger.info(
                 "Ночное дообучение завершено",
-                trained=list(sortino_scores.keys()),
+                trained=list(spearman_scores.keys()),
                 failed=failed,
             )
 
