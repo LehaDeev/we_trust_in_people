@@ -351,12 +351,6 @@ async def cb_ml_status(callback: CallbackQuery) -> None:
             f"  {ticker:<6} {_quality(score):<16}{_trend(ticker, score)}"
             for ticker, score in sorted(spearman_scores.items())
         )
-        avg_quality = _quality(avg)
-        avg_trend = ""
-        if prev_avg is not None:
-            d = avg - prev_avg
-            avg_trend = "  ↑" if d > 0.001 else ("  ↓" if d < -0.001 else "  =")
-
         failed_str = f"\n\n⚠️ Ошибки: {', '.join(failed)}" if failed else ""
 
         text = (
@@ -364,7 +358,7 @@ async def cb_ml_status(callback: CallbackQuery) -> None:
             f"Обучено: <b>{trained_msk.strftime('%d.%m.%Y %H:%M')} МСК</b>\n"
             f"Тип:     <b>{_ml_nightly_status(trained_msk, force_tune)}</b>\n\n"
             f"<b>Качество сигналов по тикерам:</b>\n"
-            f"<code>{score_lines}\n{'─'*30}\n  {'Среднее':<6} {avg_quality:<16}{avg_trend}</code>"
+            f"<code>{score_lines}</code>"
             f"{failed_str}"
         )
     except Exception as e:
