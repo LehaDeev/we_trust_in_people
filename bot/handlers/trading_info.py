@@ -326,32 +326,45 @@ async def cb_ml_status(callback: CallbackQuery) -> None:
         avg = sum(spearman_scores.values()) / len(spearman_scores) if spearman_scores else 0.0
         prev_avg = sum(prev_scores.values()) / len(prev_scores) if prev_scores else None
 
-        def _delta(ticker: str, cur: float) -> str:
+        def _quality(score: float) -> str:
+            """Качество модели по значению Spearman."""
+            if score < 0:
+                return "❌ Нет сигнала"
+            elif score < 0.015:
+                return "🔴 Слабый"
+            elif score < 0.03:
+                return "🟡 Средний"
+            elif score < 0.05:
+                return "🟢 Хороший"
+            else:
+                return "💪 Сильный"
+
+        def _trend(ticker: str, cur: float) -> str:
             if ticker not in prev_scores:
                 return ""
             d = cur - prev_scores[ticker]
-            if abs(d) < 0.0001:
-                return " (=)"
-            return f" ({d:+.4f})"
+            if abs(d) < 0.001:
+                return "  ="
+            return "  ↑" if d > 0 else "  ↓"
 
-        # Строки: тикер | Spearman | порог P&L | дельта
         score_lines = "\n".join(
-            f"  {ticker:<6} {score:+.4f}  thr={_load_ticker_threshold(ticker)}{_delta(ticker, score)}"
+            f"  {ticker:<6} {_quality(score):<16}{_trend(ticker, score)}"
             for ticker, score in sorted(spearman_scores.items())
         )
-        avg_delta = ""
+        avg_quality = _quality(avg)
+        avg_trend = ""
         if prev_avg is not None:
             d = avg - prev_avg
-            avg_delta = f" ({d:+.4f})" if abs(d) >= 0.0001 else " (=)"
+            avg_trend = "  ↑" if d > 0.001 else ("  ↓" if d < -0.001 else "  =")
+
         failed_str = f"\n\n⚠️ Ошибки: {', '.join(failed)}" if failed else ""
 
         text = (
             "🧠 <b>ML модели</b>\n\n"
-            f"Последнее обучение:  <b>{trained_msk.strftime('%d.%m.%Y %H:%M')} МСК</b>\n"
-            f"Ночное сегодня:      <b>{_ml_nightly_status(trained_msk, force_tune)}</b>\n"
-            f"Optuna (force_tune): <b>{'Да' if force_tune else 'Нет'}</b>\n\n"
-            f"<b>Spearman / порог P&L по тикерам:</b>\n"
-            f"<code>{score_lines}\n{'─'*32}\n  {'Среднее':<6} {avg:+.4f}{avg_delta}</code>"
+            f"Обучено: <b>{trained_msk.strftime('%d.%m.%Y %H:%M')} МСК</b>\n"
+            f"Тип:     <b>{_ml_nightly_status(trained_msk, force_tune)}</b>\n\n"
+            f"<b>Качество сигналов по тикерам:</b>\n"
+            f"<code>{score_lines}\n{'─'*30}\n  {'Среднее':<6} {avg_quality:<16}{avg_trend}</code>"
             f"{failed_str}"
         )
     except Exception as e:
