@@ -230,8 +230,12 @@ class TradingScheduler:
                             # Не FILL (истёк или заархивирован) — перевыставляем TP если сессия открыта
                             if close_reason != "TAKE_PROFIT":
                                 if not _is_moex_session_open():
+                                    # Очищаем ID чтобы утром гарантированно попасть в ветку
+                                    # повторного выставления TP при открытии сессии
+                                    trade.tp_order_id = None
+                                    await trade_repo.update_trade(session, trade)
                                     logger.debug(
-                                        "TP ордер исчез, но биржа закрыта — перевыставим позже",
+                                        "TP ордер исчез, биржа закрыта — ID очищен, перевыставим при открытии сессии",
                                         ticker=asset.ticker,
                                     )
                                 else:
@@ -354,27 +358,30 @@ class TradingScheduler:
                                     ticker=asset.ticker,
                                     error=str(re_e),
                                 )
-                        try:
-                            price_step = await get_min_price_increment(figi)
-                            sl_rounded = round_sl_to_step(trade.stop_loss_price, price_step)
-                            new_sl_id = await post_stop_order(
-                                instrument_id=figi,
-                                quantity=trade.lots,
-                                stop_price=sl_rounded,
-                                direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
-                            )
-                            trade.sl_stop_order_id = new_sl_id
-                            logger.info(
-                                "SL стоп-ордер выставлен (не был создан при открытии)",
-                                ticker=asset.ticker,
-                                stop_order_id=new_sl_id,
-                            )
-                        except Exception as re_e:
-                            logger.error(
-                                "Не удалось выставить SL стоп-ордер",
-                                ticker=asset.ticker,
-                                error=str(re_e),
-                            )
+                        # SL выставляем только если его ещё нет — стоп-ордера
+                        # живут между сессиями и не должны дублироваться
+                        if not trade.sl_stop_order_id:
+                            try:
+                                price_step = await get_min_price_increment(figi)
+                                sl_rounded = round_sl_to_step(trade.stop_loss_price, price_step)
+                                new_sl_id = await post_stop_order(
+                                    instrument_id=figi,
+                                    quantity=trade.lots,
+                                    stop_price=sl_rounded,
+                                    direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                                )
+                                trade.sl_stop_order_id = new_sl_id
+                                logger.info(
+                                    "SL стоп-ордер выставлен (не был создан при открытии)",
+                                    ticker=asset.ticker,
+                                    stop_order_id=new_sl_id,
+                                )
+                            except Exception as re_e:
+                                logger.error(
+                                    "Не удалось выставить SL стоп-ордер",
+                                    ticker=asset.ticker,
+                                    error=str(re_e),
+                                )
                         if trade.tp_order_id or trade.sl_stop_order_id:
                             await trade_repo.update_trade(session, trade)
                             continue
