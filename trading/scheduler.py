@@ -75,24 +75,51 @@ class TradingScheduler:
         """
         Запустить бесконечный цикл автоторговли.
 
-        Каждые TRADING_INTERVAL_SECONDS выполняет один тик.
-        Все исключения перехватываются — цикл не останавливается.
+        Параллельно запускает:
+        - основной цикл тиков каждые TRADING_INTERVAL_SECONDS
+        - утренний тик в 9:50 МСК для перевыставления TP до открытия сессии
         """
-        interval = trading_settings.check_interval_seconds
         logger.info(
             "TradingScheduler запущен",
             enabled=trading_settings.enabled,
-            interval_seconds=interval,
+            interval_seconds=trading_settings.check_interval_seconds,
+        )
+        await asyncio.gather(
+            self._main_loop(),
+            self._morning_tp_loop(),
         )
 
+    async def _main_loop(self) -> None:
+        """Основной цикл тиков по расписанию."""
+        interval = trading_settings.check_interval_seconds
         while True:
             try:
                 await self._tick()
             except Exception as e:
                 logger.error("Критическая ошибка тика", error=str(e), exc_info=True)
-
             logger.debug("Следующий тик", interval_seconds=interval)
             await asyncio.sleep(interval)
+
+    async def _morning_tp_loop(self) -> None:
+        """Ежедневно в 9:50 МСК запускает тик для перевыставления TP перед открытием сессии."""
+        from datetime import datetime, timedelta
+        while True:
+            now = datetime.now(ZoneInfo("Europe/Moscow"))
+            target = now.replace(hour=9, minute=50, second=0, microsecond=0)
+            if now >= target:
+                target += timedelta(days=1)
+            wait_seconds = (target - now).total_seconds()
+            logger.debug(
+                "Утренний тик TP запланирован",
+                at=target.strftime("%Y-%m-%d %H:%M МСК"),
+                wait_seconds=int(wait_seconds),
+            )
+            await asyncio.sleep(wait_seconds)
+            logger.info("Утренний тик: перевыставление TP (9:50 МСК)")
+            try:
+                await self._tick()
+            except Exception as e:
+                logger.error("Ошибка утреннего тика TP", error=str(e), exc_info=True)
 
     async def _tick(self) -> None:
         """
@@ -637,16 +664,18 @@ def _is_moex_session_open() -> bool:
     Проверить, открыта ли торговая сессия МОЕХ прямо сейчас.
 
     Лимитные ордера (TP) принимаются только во время сессии:
-    - Основная:  10:00 – 18:50 МСК
-    - Вечерняя: 19:00 – 23:50 МСК
+    - Предторговый: 09:45 – 10:00 МСК (лимитные T0 принимаются)
+    - Основная:     10:00 – 18:50 МСК
+    - Вечерняя:     19:05 – 23:50 МСК
 
     Стоп-ордера (SL) принимаются круглосуточно — эта проверка для них не нужна.
     """
     from datetime import datetime
     now_msk = datetime.now(ZoneInfo("Europe/Moscow")).time()
-    main_open = time(10, 0) <= now_msk < time(18, 50)
-    evening_open = time(19, 0) <= now_msk < time(23, 50)
-    return main_open or evening_open
+    pretrade   = time(9, 45)  <= now_msk < time(10, 0)
+    main_open  = time(10, 0)  <= now_msk < time(18, 50)
+    evening_open = time(19, 5) <= now_msk < time(23, 50)
+    return pretrade or main_open or evening_open
 
 
 async def _update_candles() -> None:
