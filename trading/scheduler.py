@@ -462,12 +462,20 @@ class TradingScheduler:
                             reason=close_reason,
                         )
                         open_by_asset.pop(trade.asset_id, None)
+                        # Пересчитываем breakdown от фактической цены исполнения
+                        actual_exit = closed_trade.exit_price or exit_price_for_pnl
+                        breakdown = calculate_pnl(
+                            entry_price=trade.entry_price,
+                            exit_price=actual_exit,
+                            lots=trade.lots,
+                            lot_size=lot_size,
+                        )
                         await notify_close(
                             ticker=asset.ticker,
                             entry_price=trade.entry_price,
-                            exit_price=closed_trade.exit_price or current_price,
+                            exit_price=actual_exit,
                             reason=close_reason,
-                            net_pnl=closed_trade.pnl or Decimal("0"),
+                            net_pnl=closed_trade.pnl or breakdown.net_pnl,
                             gross_pnl=breakdown.gross_pnl,
                             commission=breakdown.buy_commission + breakdown.sell_commission,
                             tax=breakdown.tax,
@@ -544,12 +552,20 @@ class TradingScheduler:
                     )
                     open_by_asset.pop(asset.id, None)
                     open_count -= 1
+                    # Пересчитываем breakdown от фактической цены исполнения
+                    actual_exit = closed_trade.exit_price or current_price
+                    breakdown = calculate_pnl(
+                        entry_price=trade.entry_price,
+                        exit_price=actual_exit,
+                        lots=trade.lots,
+                        lot_size=lot_size,
+                    )
                     await notify_close(
                         ticker=ticker,
                         entry_price=trade.entry_price,
-                        exit_price=closed_trade.exit_price or current_price,
+                        exit_price=actual_exit,
                         reason="SELL_SIGNAL",
-                        net_pnl=closed_trade.pnl or Decimal("0"),
+                        net_pnl=closed_trade.pnl or breakdown.net_pnl,
                         gross_pnl=breakdown.gross_pnl,
                         commission=breakdown.buy_commission + breakdown.sell_commission,
                         tax=breakdown.tax,
