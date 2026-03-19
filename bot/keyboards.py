@@ -20,21 +20,48 @@ def main_menu() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def ticker_select(tickers: list[str]) -> InlineKeyboardMarkup:
+_TICKERS_PER_PAGE = 15
+
+
+def ticker_select(tickers: list[str], page: int = 0) -> InlineKeyboardMarkup:
     """
-    Выбор тикера для запроса сигнала.
+    Выбор тикера для запроса сигнала с пагинацией.
 
     Аргументы:
         tickers: список тикеров (например, ["SBER", "GAZP", ...]).
+        page: номер страницы (0-based).
     """
     builder = InlineKeyboardBuilder()
-    # Кнопки по 3 в ряд
+    total_pages = max(1, (len(tickers) + _TICKERS_PER_PAGE - 1) // _TICKERS_PER_PAGE)
+    page = max(0, min(page, total_pages - 1))
+
+    start = page * _TICKERS_PER_PAGE
+    page_tickers = tickers[start : start + _TICKERS_PER_PAGE]
+
+    # Кнопки тикеров по 3 в ряд
     buttons = [
         InlineKeyboardButton(text=ticker, callback_data=f"signal:{ticker}")
-        for ticker in tickers
+        for ticker in page_tickers
     ]
     builder.add(*buttons)
-    builder.adjust(3)
+    builder.adjust(5)
+
+    # Навигация по страницам (если больше одной)
+    if total_pages > 1:
+        nav_buttons: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav_buttons.append(
+                InlineKeyboardButton(text="◀ Пред.", callback_data=f"signals_page:{page - 1}")
+            )
+        nav_buttons.append(
+            InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop")
+        )
+        if page < total_pages - 1:
+            nav_buttons.append(
+                InlineKeyboardButton(text="След. ▶", callback_data=f"signals_page:{page + 1}")
+            )
+        builder.row(*nav_buttons)
+
     builder.row(InlineKeyboardButton(text="◀ Назад", callback_data="menu:main"))
     return builder.as_markup()
 

@@ -9,7 +9,7 @@
 ## Возможности
 
 - **Tinkoff Invest API** — асинхронная интеграция, боевой режим, rate limiter
-- **ML-ансамбль** — `VotingClassifier(soft)`: LightGBM + ExtraTrees, Optuna HPO, per-ticker отбор признаков → [подробнее](docs/ml.md)
+- **ML-ансамбль** — `RankEnsemble` (z-score): LightGBM + ExtraTrees + HistGBM, Optuna HPO, per-ticker отбор признаков → [подробнее](docs/ml.md)
 - **Ночное дообучение** — инкрементальный сбор свечей и переобучение моделей каждую ночь
 - **Автоторговля** — рыночные ордера по ML-сигналам, SL/TP, дивидендная защита → [подробнее](docs/trading.md)
 - **Ручная торговля** — покупка/продажа через Telegram с расчётом P&L и подтверждением
@@ -26,7 +26,7 @@
 | База данных | PostgreSQL + SQLAlchemy 2.x async + asyncpg |
 | Миграции | Alembic |
 | Кеш | Redis (`redis[asyncio]`) |
-| ML | LightGBM, scikit-learn, TA-Lib, Optuna |
+| ML | LightGBM, ExtraTrees, HistGradientBoosting, scikit-learn, TA-Lib, Optuna |
 | Брокер | t-tech-investments (Tinkoff Invest API gRPC) |
 | Логирование | structlog |
 
@@ -107,23 +107,10 @@ we_trust_in_people/
 
 ## Результаты обучения (последний запуск)
 
-Ансамбль `LightGBM + ExtraTrees`, Optuna HPO 50 trials × 2 модели, 5-fold TimeSeriesSplit,
-~7 100 часовых свечей на тикер.
+Ансамбль `RankEnsemble`: LightGBM + ExtraTrees + HistGBM, Optuna TPE HPO, 5-fold TimeSeriesSplit, 27 тикеров.
+Метрика: **Spearman correlation** между pnl\_pred и реальным net P&L на CV.
 
-| Тикер | F1 (CV) | Признаков |
-|-------|---------|-----------|
-| TATN  | **0.4179** | 33 / 52 |
-| ROSN  | 0.4105 | 42 / 52 |
-| SBER  | 0.4049 | 32 / 52 |
-| GMKN  | 0.4048 | 34 / 52 |
-| YDEX  | 0.4010 | 37 / 52 |
-| MTSS  | 0.4007 | 37 / 52 |
-| NVTK  | 0.3884 | 49 / 52 |
-| GAZP  | 0.3788 | 37 / 52 |
-| MGNT  | 0.3709 | 41 / 52 |
-| LKOH  | 0.3632 | 40 / 52 |
-
-F1 — macro-averaged по классам BUY / HOLD / SELL на отложенной временной выборке.
+Актуальные результаты автоматически обновляются в `ml/weights/last_results.json` после каждого обучения.
 
 ## Важные ограничения
 

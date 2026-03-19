@@ -80,7 +80,7 @@
 | `TRADING_MAX_POSITIONS` | Макс. одновременных позиций | `5` |
 | `TRADING_INTERVAL_SECONDS` | Интервал проверки сигналов (сек) | `3600` |
 | `TRADING_CHAT_ID` | Telegram chat_id для уведомлений | — |
-| `TRADING_BROKER_COMMISSION_PCT` | Комиссия брокера за сделку | `0.003` |
+| `TRADING_BROKER_COMMISSION_PCT` | Комиссия брокера за сделку (взимается при покупке и продаже). Тариф «Инвестор» = `0.003` (0.3%), тариф «Трейдер» = `0.0005` (0.05%) | `0.0005` |
 | `TRADING_TAX_PCT` | НДФЛ на прибыль от продажи | `0.13` |
 | `TRADING_DIVIDEND_PROTECTION_DAYS` | Дней защиты SL после экс-даты (глобальный фоллбэк) | `1` |
 | `TRADING_DIVIDEND_OVERRIDE` | Ручные окна защиты по тикерам (`SBER:45,GAZP:90`) | — |
@@ -96,3 +96,4 @@
 | `DEBUG` | Режим отладки | `false` |
 | `ANTHROPIC_API_KEY` | Ключ Anthropic API (для 3-агентной системы) | — |
 | `AGENT_MODEL` | Модель для агентов | `claude-opus-4-6` |
+| `AGENT_MAX_REVISIONS` | Максимум раундов ревизии кода (Coder → Reviewer → Coder) | `2` |

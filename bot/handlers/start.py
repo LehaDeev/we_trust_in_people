@@ -36,11 +36,26 @@ async def cb_main_menu(callback: CallbackQuery) -> None:
 
 @router.callback_query(lambda c: c.data == "menu:signals")
 async def cb_signals_menu(callback: CallbackQuery) -> None:
-    """Показать список тикеров для выбора сигнала."""
+    """Показать список тикеров для выбора сигнала (страница 1)."""
     tickers = data_settings.tickers
     await callback.message.edit_text(
         "📊 <b>Сигналы</b>\n\nВыберите тикер:",
-        reply_markup=ticker_select(tickers),
+        reply_markup=ticker_select(tickers, page=0),
         parse_mode="HTML",
     )
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data and c.data.startswith("signals_page:"))
+async def cb_signals_page(callback: CallbackQuery) -> None:
+    """Переключить страницу списка тикеров."""
+    page = int(callback.data.split(":", 1)[1])
+    tickers = data_settings.tickers
+    await callback.message.edit_reply_markup(reply_markup=ticker_select(tickers, page=page))
+    await callback.answer()
+
+
+@router.callback_query(lambda c: c.data == "noop")
+async def cb_noop(callback: CallbackQuery) -> None:
+    """Заглушка для неактивных кнопок (счётчик страниц)."""
     await callback.answer()
