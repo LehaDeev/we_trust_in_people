@@ -34,7 +34,7 @@ def _nightly_status(trained_at_str: str, force_tune: bool) -> str:
 
 
 def main() -> None:
-    """Прочитать и вывести таблицу F1 из последнего обучения."""
+    """Прочитать и вывести таблицу Spearman корреляций из последнего обучения."""
     if not RESULTS_PATH.exists():
         print("Файл метрик не найден. Запустите train_model хотя бы один раз.")
         return
@@ -49,17 +49,21 @@ def main() -> None:
     print(f"Ночное сегодня  : {_nightly_status(trained_at, force_tune)}")
     print(f"force_tune      : {force_tune}")
     print()
-    print(f"{'Тикер':<8} {'F1':>8}")
-    print("-" * 18)
 
-    f1_scores: dict[str, float] = data["f1_scores"]
-    for ticker, f1 in sorted(f1_scores.items()):
-        print(f"{ticker:<8} {f1:>8.4f}")
+    # Поддержка обоих форматов: новый (spearman_scores) и старый (f1_scores)
+    scores: dict[str, float] = data.get("spearman_scores") or data.get("f1_scores", {})
+    metric_name = "Spearman" if "spearman_scores" in data else "F1"
 
-    if f1_scores:
-        avg = sum(f1_scores.values()) / len(f1_scores)
-        print("-" * 18)
-        print(f"{'Среднее':<8} {avg:>8.4f}")
+    print(f"{'Тикер':<8} {metric_name:>10}")
+    print("-" * 20)
+
+    for ticker, score in sorted(scores.items()):
+        print(f"{ticker:<8} {score:>10.4f}")
+
+    if scores:
+        avg = sum(scores.values()) / len(scores)
+        print("-" * 20)
+        print(f"{'Среднее':<8} {avg:>10.4f}")
 
     if data["failed"]:
         print(f"\nОшибки: {', '.join(data['failed'])}")
