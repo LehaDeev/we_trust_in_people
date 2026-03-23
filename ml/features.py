@@ -8,10 +8,10 @@
 уровня цены тикера. Это обеспечивает стационарность признаков и корректное
 дообучение при росте или падении цены со временем.
 
-Группы признаков (52 признака):
+Группы признаков (58 признаков):
     - Тренд: SMA, нормализованные EMA, ADX
-    - Импульс: RSI, MACD, ROC, MFI, Stochastic %K/%D, CCI, Aroon Up/Down
-    - Импульс (дельты): изменение RSI/Stoch/MACD_hist за 4 бара — направление индикатора
+    - Импульс: RSI, MACD, ROC, MFI, Stochastic %K/%D, CCI, Aroon Up/Down, Williams %R
+    - Импульс (дельты): изменение RSI/Stoch/MACD_hist/CCI за 4 бара — направление индикатора
     - Волатильность: Bollinger %B, ATR-ratio, ширина Bollinger, историческая волатильность
     - Объём: OBV, нормализованный объём, volume_ratio, CMF, изменения объёма
     - Ценовые отношения: close/SMA, high-low/close, SMA20/SMA50, VWAP-ratio
@@ -21,10 +21,13 @@
     - Структура свечи: body_ratio, upper/lower shadow, gap при открытии
     - Лаговые доходности: 1h, 4h, 8h, 24h (прямой сигнал импульса)
     - Временные: час дня и день недели (синус/косинус — циклическое кодирование)
+    - Режим рынка: автокорреляция доходностей, корреляция цена×объём
 """
 import numpy as np
 import pandas as pd
 import talib
+
+from config.settings import ml_settings
 
 # Имена колонок признаков (используются для согласованности между обучением и инференсом)
 FEATURE_COLUMNS: list[str] = [
@@ -77,6 +80,23 @@ FEATURE_COLUMNS: list[str] = [
     # usdrub_ratio: нормализованный курс (close / SMA20) — без зависимости от уровня
     # usdrub_change_1h: изменение курса за 1 час — прямой сигнал движения рубля
     "usdrub_ratio", "usdrub_change_1h",
+    # ── Режим рынка и подтверждение объёма ───────────────────────────────────
+    # autocorr_returns: скользящая автокорреляция (лаг=1) доходностей за N баров.
+    # > 0 → импульсный режим (тренд продолжается), < 0 → возврат к среднему.
+    # Одна из ключевых идей WorldQuant 101 alphas и академических работ по momentum.
+    "autocorr_returns",
+    # price_vol_corr: скользящая корреляция доходность × изменение объёма за N баров.
+    # > 0 → объём подтверждает направление цены (сильный сигнал),
+    # < 0 → объём расходится с ценой (дивергенция, возможный разворот).
+    "price_vol_corr",
+    # williams_r: Williams %R — осциллятор перекупленности/перепроданности [-100, 0].
+    # Отличается от Stochastic знаком и формулой: фокус на расстоянии от максимума.
+    # -20..0 = перекуплен, -80..-100 = перепродан. Дополняет RSI и stoch иным взглядом.
+    "williams_r",
+    # cci_delta: изменение CCI за N баров — направление отклонения типичной цены от нормы.
+    # Аналогично rsi_delta_4h / stoch_k_delta_4h / macd_hist_delta_4h: направление важнее
+    # абсолютного значения. CCI пробивает +100 снизу → сильнее чем просто CCI=110.
+    "cci_delta",
 ]
 
 
@@ -297,6 +317,44 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     else:
         df["usdrub_ratio"] = 0.0
         df["usdrub_change_1h"] = 0.0
+
+    # ── Режим рынка и подтверждение объёма ───────────────────────────────────
+    # Все окна берутся из config/settings.py — не хардкодятся.
+    autocorr_window      = ml_settings.autocorr_window
+    price_vol_corr_window = ml_settings.price_vol_corr_window
+    williams_r_period    = ml_settings.williams_r_period
+    cci_delta_period     = ml_settings.cci_delta_period
+
+    # Автокорреляция доходностей (лаг 1): скользящее окно autocorr_window баров.
+    # Pandas Series.rolling().corr(shift(1)) вычисляет Pearson r(x_t, x_{t-1}).
+    # > 0 → последовательные доходности схожи (импульс), < 0 → чередуются (mean-reversion).
+    # NaN в первых autocorr_window+1 строках — удаляются при dropna.
+    returns_autocorr = pd.Series(close).pct_change()
+    df["autocorr_returns"] = (
+        returns_autocorr.rolling(autocorr_window)
+        .corr(returns_autocorr.shift(1))
+        .values
+    )
+
+    # Корреляция доходность × изменение объёма за price_vol_corr_window баров.
+    # Pearson r(return_1h, volume_change_1h) по скользящему окну.
+    # > 0 → объём растёт когда цена растёт (подтверждение), < 0 → дивергенция (слабый сигнал).
+    vol_change_for_corr = pd.Series(volume).pct_change()
+    df["price_vol_corr"] = (
+        returns_autocorr.rolling(price_vol_corr_window)
+        .corr(vol_change_for_corr)
+        .values
+    )
+
+    # Williams %R через TA-Lib: диапазон [-100, 0].
+    # -20..0 = перекуплен (цена у максимума диапазона), -80..-100 = перепродан.
+    # Отличается от Stochastic %K знаком: WILLR = -100 * (high_max - close) / (high_max - low_min).
+    df["williams_r"] = talib.WILLR(high, low, close, timeperiod=williams_r_period)
+
+    # Дельта CCI за cci_delta_period баров: направление изменения CCI важнее абсолютного значения.
+    # CCI пробивает +100 снизу вверх → вход в зону перекупленности → сильный бычий сигнал.
+    cci_series = pd.Series(talib.CCI(high, low, close, timeperiod=14))
+    df["cci_delta"] = (cci_series - cci_series.shift(cci_delta_period)).values
 
     # Удаляем строки где хотя бы один признак NaN (период прогрева, ~50 строк на тикер)
     df = df.dropna(subset=FEATURE_COLUMNS).reset_index(drop=True)

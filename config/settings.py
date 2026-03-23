@@ -165,6 +165,19 @@ class MLSettings(BaseSettings):
     # Увеличить если нужен параллельный инференс нескольких тикеров.
     model_cache_size: int = Field(1, alias="ML_MODEL_CACHE_SIZE")
 
+    # Параметры новых признаков (режим рынка и подтверждение объёма)
+    # Окно для роллинговой автокорреляции доходностей (лаг=1).
+    # 8 баров = 8 часов: достаточно для детекции краткосрочного режима (импульс vs возврат к среднему).
+    autocorr_window: int = Field(8, alias="ML_AUTOCORR_WINDOW")
+    # Окно для роллинговой корреляции доходность × изменение объёма.
+    # 20 баров совпадает с другими 20-барными индикаторами (CMF, SMA20) для согласованности.
+    price_vol_corr_window: int = Field(20, alias="ML_PRICE_VOL_CORR_WINDOW")
+    # Период Williams %R — осциллятор перекупленности/перепроданности на основе диапазона high/low.
+    # 14 совпадает со стандартным периодом RSI/CCI/MFI — сопоставимо по масштабу.
+    williams_r_period: int = Field(14, alias="ML_WILLIAMS_R_PERIOD")
+    # Лаг дельты CCI: направление изменения CCI за N баров.
+    # 4 бара совпадает с rsi_delta_4h / stoch_k_delta_4h / macd_hist_delta_4h — единая логика дельт.
+    cci_delta_period: int = Field(4, alias="ML_CCI_DELTA_PERIOD")
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
