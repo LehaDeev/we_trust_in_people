@@ -208,6 +208,16 @@ async def predict_signal(
     if not math.isfinite(last_atr_ratio) or last_atr_ratio < 0:
         last_atr_ratio = 0.0
 
+    # market_regime последнего бара: -1 = даунтренд, 0 = флет, +1 = аптренд.
+    # Вычисляется в compute_features() из ADX, SMA-кросса и Aroon.
+    # Используется в scheduler.py для торгового фильтра BUY-сигналов.
+    # При отсутствии колонки — fallback 1 (аптренд): не блокировать, backward compat.
+    last_regime: int = (
+        int(feat_df["market_regime"].iloc[-1])
+        if "market_regime" in feat_df.columns
+        else 1
+    )
+
     result = {
         "ticker": ticker,
         "signal": signal,
@@ -218,6 +228,9 @@ async def predict_signal(
         # atr_ratio = ATR(14) / close последнего бара.
         # Передаётся в executor для расчёта динамических SL/TP уровней.
         "atr_ratio": round(last_atr_ratio, 6),
+        # market_regime: -1 = даунтренд, 0 = флет, +1 = аптренд.
+        # Применяется в scheduler._apply_regime_filter() для коррекции лотов BUY.
+        "market_regime": last_regime,
     }
 
     logger.info(
@@ -227,6 +240,7 @@ async def predict_signal(
         confidence=round(pnl_pred, 4),
         volume_ratio=round(last_volume_ratio, 4),
         atr_ratio=round(last_atr_ratio, 6),
+        market_regime=last_regime,
     )
 
     # ── Redis: сохраняем в кеш ────────────────────────────────────────────────

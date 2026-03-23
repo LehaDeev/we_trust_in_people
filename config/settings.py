@@ -219,6 +219,12 @@ class MLSettings(BaseSettings):
     # Рекомендованный диапазон: [0.5, 2.0]. По умолчанию 1.0 — умеренная дифференциация.
     ensemble_weight_temp: float = Field(1.0, alias="ML_ENSEMBLE_WEIGHT_TEMP")
 
+    # Порог ADX для определения режима рынка (торговый фильтр market_regime).
+    # ADX < порога → флет (нет выраженного тренда); ADX >= порога → тренд.
+    # Стандарт для часовых данных: 20. Для дневных: 25.
+    # Используется в compute_features() при вычислении колонки market_regime.
+    regime_adx_threshold: float = Field(20.0, alias="ML_REGIME_ADX_THRESHOLD")
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
@@ -356,6 +362,20 @@ class TradingSettings(BaseSettings):
     # Жёсткий максимум лотов на одну сделку.
     # Защита от аномальных расчётов при очень большом балансе или очень узком SL.
     max_lots_per_trade: int = Field(10, alias="TRADING_MAX_LOTS_PER_TRADE")
+
+    # ── Фильтр рыночного режима (market_regime) ─────────────────────────────
+    # Включить фильтр режима рынка при открытии BUY-позиций.
+    # При false — фильтр отключён, лоты не изменяются (backward compatibility).
+    regime_filter_enabled: bool = Field(True, alias="TRADING_REGIME_FILTER_ENABLED")
+    # Режим фильтра:
+    #   "soft" — в даунтренде BUY блокируется (lots=0), в флете лоты × multiplier.
+    #   "hard" — и в даунтренде, и в флете BUY блокируется полностью (lots=0).
+    regime_filter_mode: str = Field("soft", alias="TRADING_REGIME_FILTER_MODE")
+    # Множитель лотов в режиме флета при "soft"-фильтре.
+    # 0.0 = полная блокировка в флете (идентично "hard" для флета).
+    # 0.5 = открывать вдвое меньше лотов (рекомендуется — сохраняем часть сигналов).
+    # 1.0 = флет не ограничивает (фильтрует только даунтренд).
+    regime_flat_lots_multiplier: float = Field(0.5, alias="TRADING_REGIME_FLAT_MULTIPLIER")
 
     @property
     def dividend_override(self) -> dict[str, int]:

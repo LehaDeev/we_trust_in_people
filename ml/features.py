@@ -356,6 +356,41 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     cci_series = pd.Series(talib.CCI(high, low, close, timeperiod=14))
     df["cci_delta"] = (cci_series - cci_series.shift(cci_delta_period)).values
 
+    # ── Режим рынка (торговый фильтр) ────────────────────────────────────────
+    # Агрегированный признак: -1 = даунтренд, 0 = флет, +1 = аптренд.
+    # Вычисляется из ADX (сила тренда), SMA-кросса (направление) и Aroon (подтверждение).
+    #
+    # Формула:
+    #   +1 (аптренд):   SMA20 > SMA50 И close > SMA20 И (ADX > порог ИЛИ aroon_up > aroon_down)
+    #   -1 (даунтренд): SMA20 < SMA50 И close < SMA20 И (ADX > порог ИЛИ aroon_down > aroon_up)
+    #    0 (флет):      все остальные случаи (нет явного тренда)
+    #
+    # НЕ является ML-признаком (нет в FEATURE_COLUMNS) — служебная колонка для
+    # торгового фильтра в scheduler.py. Извлекается через feat_df["market_regime"]
+    # в predict.py и передаётся в результирующем словаре сигнала.
+    _adx_vals    = df["ADX_14"].values       if "ADX_14"            in df.columns else np.zeros(len(df))
+    _sma_ratio   = df["sma20_sma50_ratio"].values if "sma20_sma50_ratio" in df.columns else np.ones(len(df))
+    _close_sma20 = df["close_sma20_ratio"].values if "close_sma20_ratio" in df.columns else np.ones(len(df))
+    _aroon_u     = df["aroon_up"].values     if "aroon_up"          in df.columns else np.full(len(df), 50.0)
+    _aroon_d     = df["aroon_down"].values   if "aroon_down"        in df.columns else np.full(len(df), 50.0)
+
+    _adx_threshold = ml_settings.regime_adx_threshold
+
+    _regime = np.zeros(len(df), dtype=np.float64)
+    _uptrend   = (
+        (_sma_ratio > 1.0)
+        & (_close_sma20 > 1.0)
+        & ((_adx_vals > _adx_threshold) | (_aroon_u > _aroon_d))
+    )
+    _downtrend = (
+        (_sma_ratio < 1.0)
+        & (_close_sma20 < 1.0)
+        & ((_adx_vals > _adx_threshold) | (_aroon_d > _aroon_u))
+    )
+    _regime[_uptrend]   = 1.0
+    _regime[_downtrend] = -1.0
+    df["market_regime"] = _regime
+
     # Удаляем строки где хотя бы один признак NaN (период прогрева, ~50 строк на тикер)
     df = df.dropna(subset=FEATURE_COLUMNS).reset_index(drop=True)
 

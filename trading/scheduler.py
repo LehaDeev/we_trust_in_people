@@ -43,6 +43,43 @@ def _ticker_threshold(ticker: str) -> float:
         return trading_settings.confidence_threshold
 
 
+def _apply_regime_filter(lots: int, regime: int) -> int:
+    """
+    Скорректировать количество лотов с учётом рыночного режима.
+
+    Режимы рынка (из predict_signal / compute_features):
+        +1 = аптренд  → лоты не изменяются.
+        -1 = даунтренд → BUY всегда блокируется (lots = 0).
+         0 = флет     → поведение зависит от TRADING_REGIME_FILTER_MODE:
+             "soft": лоты × TRADING_REGIME_FLAT_MULTIPLIER (по умолчанию 0.5).
+             "hard": BUY блокируется полностью (lots = 0).
+
+    При TRADING_REGIME_FILTER_ENABLED=false возвращает lots без изменений
+    (backward compatibility — фильтр отключён).
+
+    Аргументы:
+        lots:   расчётное количество лотов (>= 0).
+        regime: режим рынка (-1, 0 или +1).
+
+    Возвращает:
+        Скорректированное количество лотов (0 = BUY пропускается).
+    """
+    ts = trading_settings
+    if not ts.regime_filter_enabled:
+        return lots
+    if regime == -1:
+        # Даунтренд: BUY заблокирован в любом режиме фильтра
+        return 0
+    if regime == 0:
+        if ts.regime_filter_mode == "hard":
+            # Жёсткий режим: флет = блокировка
+            return 0
+        # Мягкий режим: уменьшить лоты пропорционально множителю
+        return max(0, int(lots * ts.regime_flat_lots_multiplier))
+    # regime == +1 (аптренд): без ограничений
+    return lots
+
+
 def _compute_dynamic_sltp(atr_ratio: float) -> tuple[float, float]:
     """
     Вычислить динамические SL/TP на основе ATR-волатильности последнего бара.
@@ -664,6 +701,23 @@ class TradingScheduler:
                     # Рассчитываем число лотов по методу Fixed Fractional Risk.
                     # При TRADING_POSITION_SIZING='fixed_lots' — возвращает lots_per_ticker.
                     lots = compute_lots(rub_balance, current_price, lot_size, _sl_pct)
+
+                    # Фильтр рыночного режима: корректируем лоты с учётом тренда.
+                    # В даунтренде (-1) BUY всегда блокируется.
+                    # В флете (0) при "soft" лоты умножаются на TRADING_REGIME_FLAT_MULTIPLIER.
+                    # При TRADING_REGIME_FILTER_ENABLED=false — фильтр не применяется.
+                    _regime: int = sig.get("market_regime", 1)
+                    lots = _apply_regime_filter(lots, _regime)
+                    if lots == 0:
+                        logger.info(
+                            "BUY-сигнал пропущен: рыночный режим не допускает открытие позиции",
+                            ticker=ticker,
+                            market_regime=_regime,
+                            regime_filter_enabled=trading_settings.regime_filter_enabled,
+                            regime_filter_mode=trading_settings.regime_filter_mode,
+                        )
+                        continue
+
                     needed = current_price * Decimal(lots) * Decimal(lot_size)
 
                     # Проверяем баланс перед выставлением ордера
