@@ -118,6 +118,48 @@ Breakeven: gross > +0.10% (= 2 × 0.05% комиссии)
 - SL=3.0%: срабатывает ~0.5–1.2% — редко, защита от крупных движений
 - ~93% сделок закрываются по сигналу планировщика (следующий тик — SELL/HOLD), не по SL/TP
 
+## Динамические SL/TP на основе ATR
+
+При `TRADING_DYNAMIC_SLTP_ENABLED=true` уровни SL/TP вычисляются индивидуально
+для каждой сделки на основе текущей волатильности инструмента:
+
+```
+atr_ratio = ATR(14) / close  (последний завершённый бар)
+
+sl_pct = clamp(atr_ratio × TRADING_ATR_SL_MULTIPLIER,
+               TRADING_ATR_MIN_SL_PCT,
+               TRADING_ATR_MAX_SL_PCT)
+
+tp_pct = sl_pct × TRADING_ATR_RISK_REWARD_RATIO
+tp_pct = max(tp_pct, sl_pct)   # TP не ниже SL (минимальный RR = 1:1)
+```
+
+`atr_ratio` передаётся из `predict_signal()` в поле `"atr_ratio"` результирующего словаря.
+При `atr_ratio = 0` (признак не вычислен) или `TRADING_DYNAMIC_SLTP_ENABLED=false` —
+используются фиксированные `TRADING_STOP_LOSS_PCT` / `TRADING_TAKE_PROFIT_PCT`.
+
+### Типичные значения для MOEX тикеров (1h свечи)
+
+| Тикер | atr_ratio (типичный) | SL при ×2.0 | Диапазон после clamp |
+|---|---|---|---|
+| SBER, GAZP (ликвидные) | 0.007–0.010 | 1.4%–2.0% | 1.5%–2.0% (min clamp 1.5%) |
+| LKOH, GMKN (средние) | 0.009–0.013 | 1.8%–2.6% | 1.8%–2.6% |
+| FEES, HYDR (низкая ликв.) | 0.010–0.020 | 2.0%–4.0% | 2.0%–4.0% |
+| Кризисная волатильность | 0.025+ | 5.0%+ | 5.0% (max clamp) |
+
+**Примеры** при `ATR_SL_MULTIPLIER=2.0`, `ATR_RISK_REWARD_RATIO=1.67`, `min=1.5%, max=5%`:
+- `atr_ratio=0.008` → SL=1.6%, TP=2.7%
+- `atr_ratio=0.012` → SL=2.4%, TP=4.0%
+- `atr_ratio=0.018` → SL=3.6%, TP=6.0%
+- `atr_ratio=0.030` → SL=5.0% (max), TP=8.35%
+
+### Логирование
+
+При каждом открытии позиции в лог выводятся `sl_pct` и `tp_pct`:
+```
+Позиция открыта ticker=SBER sl_pct=0.024 tp_pct=0.04 stop_loss=... take_profit=...
+```
+
 ## FIFO
 
 При наличии нескольких открытых позиций по одному активу всегда продаётся

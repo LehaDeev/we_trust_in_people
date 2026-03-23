@@ -20,6 +20,7 @@
 """
 import asyncio
 import json
+import math
 from datetime import time
 from decimal import Decimal
 from pathlib import Path
@@ -40,6 +41,38 @@ def _ticker_threshold(ticker: str) -> float:
             return json.load(f)["threshold"]
     except Exception:
         return trading_settings.confidence_threshold
+
+
+def _compute_dynamic_sltp(atr_ratio: float) -> tuple[float, float]:
+    """
+    Вычислить динамические SL/TP на основе ATR-волатильности последнего бара.
+
+    Алгоритм:
+        sl_pct = clamp(atr_ratio × ATR_SL_MULTIPLIER, min_sl, max_sl)
+        tp_pct = sl_pct × ATR_RISK_REWARD_RATIO
+
+    При TRADING_DYNAMIC_SLTP_ENABLED=false или некорректном atr_ratio (0, NaN, inf)
+    возвращает фиксированные значения TRADING_STOP_LOSS_PCT / TRADING_TAKE_PROFIT_PCT
+    из настроек — полная обратная совместимость.
+
+    Аргументы:
+        atr_ratio: ATR(14) / close последнего бара из predict_signal().
+                   Типичный диапазон MOEX 1h: 0.005–0.015.
+                   0.0 означает «не вычислено» → возврат фиксированных значений.
+
+    Возвращает:
+        (sl_pct, tp_pct): доли от цены входа (например 0.025, 0.042).
+    """
+    ts = trading_settings
+    if not ts.dynamic_sltp_enabled or not math.isfinite(atr_ratio) or atr_ratio <= 0.0:
+        return ts.stop_loss_pct, ts.take_profit_pct
+
+    sl = float(max(ts.atr_min_sl_pct, min(atr_ratio * ts.atr_sl_multiplier, ts.atr_max_sl_pct)))
+    tp = sl * ts.atr_risk_reward_ratio
+    # TP не может быть меньше самого SL — минимальное соотношение 1:1
+    tp = max(tp, sl)
+    return sl, tp
+
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -634,12 +667,19 @@ class TradingScheduler:
                         await notify_insufficient_balance(ticker, needed, rub_balance)
                         continue
 
+                    # Вычисляем динамические SL/TP на основе ATR-волатильности сигнала.
+                    # При TRADING_DYNAMIC_SLTP_ENABLED=false возвращает фиксированные значения.
+                    _atr_ratio: float = sig.get("atr_ratio", 0.0)
+                    _sl_pct, _tp_pct = _compute_dynamic_sltp(_atr_ratio)
+
                     new_trade = await self._executor.open_position(
                         session=session,
                         asset=asset,
                         instrument_uid=figi,
                         current_price=current_price,
                         lot_size=lot_size,
+                        sl_pct=_sl_pct,
+                        tp_pct=_tp_pct,
                     )
                     if new_trade:
                         open_by_asset[asset.id] = new_trade

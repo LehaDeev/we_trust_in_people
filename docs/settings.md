@@ -98,6 +98,11 @@
 | `TRADING_VOLUME_MIN_RATIO` | Мин. `volume_ratio` для подтверждения BUY (`1.0` = отключён) | `1.0` |
 | `TRADING_ORDER_POLL_SECONDS` | Интервал polling SL стоп-ордеров в OrderWatcher (сек) | `30` |
 | `TRADING_CANDLE_UPDATE_PAUSE_SECONDS` | Пауза между тикерами при внутрисессионном обновлении свечей (сек) | `3` |
+| `TRADING_DYNAMIC_SLTP_ENABLED` | Включить динамические SL/TP на основе ATR. При `false` — используются фиксированные `STOP_LOSS_PCT`/`TAKE_PROFIT_PCT` | `true` |
+| `TRADING_ATR_SL_MULTIPLIER` | Множитель ATR для расчёта SL: `sl = clamp(atr_ratio × mult, min, max)`. Рекомендуется 1.5–2.5 для часовых свечей | `2.0` |
+| `TRADING_ATR_RISK_REWARD_RATIO` | Соотношение RR: `tp = sl × ratio`. `1.67` ≈ 5:3; `2.0` = классический 2:1 | `1.67` |
+| `TRADING_ATR_MIN_SL_PCT` | Минимальный SL при ATR-расчёте (защита от узких стопов при тихом рынке) | `0.015` |
+| `TRADING_ATR_MAX_SL_PCT` | Максимальный SL при ATR-расчёте (ограничение потерь при кризисной волатильности) | `0.05` |
 
 ## Приложение
 

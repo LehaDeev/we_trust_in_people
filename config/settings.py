@@ -327,6 +327,21 @@ class TradingSettings(BaseSettings):
     # Для ночного переобучения используется DATA_COLLECT_PAUSE_SECONDS (дольше, но безопаснее).
     # Здесь загружается 1–2 свечи на тикер — короткая пауза не вызывает RESOURCE_EXHAUSTED.
     candle_update_pause_seconds: int = Field(3, alias="TRADING_CANDLE_UPDATE_PAUSE_SECONDS")
+    # Динамические SL/TP на основе ATR-волатильности.
+    # При enabled=true sl_pct = clamp(atr_ratio × multiplier, min_sl, max_sl),
+    # tp_pct = sl_pct × risk_reward_ratio.
+    # При enabled=false или atr_ratio=0 — используются фиксированные TRADING_STOP_LOSS_PCT / TRADING_TAKE_PROFIT_PCT.
+    dynamic_sltp_enabled: bool = Field(True, alias="TRADING_DYNAMIC_SLTP_ENABLED")
+    # Множитель ATR для расчёта SL: sl_pct = atr_ratio × multiplier.
+    # Рекомендуется 1.5–2.5 для часовых свечей (дневная/свинг-торговля).
+    atr_sl_multiplier: float = Field(2.0, alias="TRADING_ATR_SL_MULTIPLIER")
+    # Соотношение риск/прибыль: tp_pct = sl_pct × ratio.
+    # 1.67 ≈ RR 5:3 (при SL=3% → TP=5%); 2.0 = RR 2:1.
+    atr_risk_reward_ratio: float = Field(1.67, alias="TRADING_ATR_RISK_REWARD_RATIO")
+    # Минимальный SL при динамическом расчёте (защита от слишком узких стопов при тихом рынке).
+    atr_min_sl_pct: float = Field(0.015, alias="TRADING_ATR_MIN_SL_PCT")
+    # Максимальный SL при динамическом расчёте (защита от чрезмерных убытков при кризисе).
+    atr_max_sl_pct: float = Field(0.05, alias="TRADING_ATR_MAX_SL_PCT")
 
     @property
     def dividend_override(self) -> dict[str, int]:

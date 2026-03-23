@@ -15,9 +15,10 @@
     from ml.predict import predict_signal
 
     result = asyncio.run(predict_signal("SBER"))
-    # {"ticker": "SBER", "signal": "BUY", "confidence": 0.0083, "volume_ratio": 1.24}
+    # {"ticker": "SBER", "signal": "BUY", "confidence": 0.0083, "volume_ratio": 1.24, "atr_ratio": 0.0087}
 """
 import json
+import math
 import pickle
 from collections import OrderedDict
 from pathlib import Path
@@ -130,6 +131,8 @@ async def predict_signal(
             confidence (float):   предсказанный net P&L (доля; например 0.0083 = 0.83%).
                                   Положительный → BUY, отрицательный → SELL, ноль → HOLD.
             volume_ratio (float): объём последнего бара / SMA_20 объёма (фильтр подтверждения)
+            atr_ratio (float):    ATR(14) / close последнего бара — нормализованная волатильность.
+                                  Типичный диапазон MOEX 1h: 0.005–0.015. 0.0 = не вычислено.
 
     Исключения:
         FileNotFoundError: если веса ансамбля для тикера не найдены.
@@ -197,6 +200,14 @@ async def predict_signal(
     # > 1.0 — объём выше среднего (движение подтверждено), < 1.0 — слабый объём
     last_volume_ratio = float(feat_df["volume_ratio"].iloc[-1]) if "volume_ratio" in feat_df.columns else 1.0
 
+    # atr_ratio последнего бара: ATR(14) / close — нормализованная волатильность.
+    # Используется в scheduler для вычисления динамических SL/TP при TRADING_DYNAMIC_SLTP_ENABLED=true.
+    # Типичный диапазон для MOEX часовых свечей: 0.005–0.015 (0.5%–1.5% на час).
+    last_atr_ratio = float(feat_df["atr_ratio"].iloc[-1]) if "atr_ratio" in feat_df.columns else 0.0
+    # Защита от NaN/inf: при некорректном значении устанавливаем 0 (fallback на фиксированные SL/TP)
+    if not math.isfinite(last_atr_ratio) or last_atr_ratio < 0:
+        last_atr_ratio = 0.0
+
     result = {
         "ticker": ticker,
         "signal": signal,
@@ -204,6 +215,9 @@ async def predict_signal(
         # Scheduler сравнивает это значение с per-ticker порогом входа.
         "confidence": round(pnl_pred, 6),
         "volume_ratio": round(last_volume_ratio, 4),
+        # atr_ratio = ATR(14) / close последнего бара.
+        # Передаётся в executor для расчёта динамических SL/TP уровней.
+        "atr_ratio": round(last_atr_ratio, 6),
     }
 
     logger.info(
@@ -212,6 +226,7 @@ async def predict_signal(
         signal=signal,
         confidence=round(pnl_pred, 4),
         volume_ratio=round(last_volume_ratio, 4),
+        atr_ratio=round(last_atr_ratio, 6),
     )
 
     # ── Redis: сохраняем в кеш ────────────────────────────────────────────────

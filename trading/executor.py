@@ -43,6 +43,8 @@ class TradeExecutor:
         instrument_uid: str,
         current_price: Decimal,
         lot_size: int = 1,
+        sl_pct: float | None = None,
+        tp_pct: float | None = None,
     ) -> Trade | None:
         """
         Открыть длинную позицию по рыночной цене.
@@ -56,6 +58,8 @@ class TradeExecutor:
             instrument_uid: UID инструмента для Tinkoff API
             current_price:  текущая цена за 1 бумагу (используется для расчёта SL/TP)
             lot_size:       количество бумаг в 1 лоте
+            sl_pct:         целевой чистый убыток для SL (доля; None = взять из trading_settings)
+            tp_pct:         целевая чистая прибыль для TP (доля; None = взять из trading_settings)
 
         Возвращает:
             Trade с status='OPEN' при успехе, None при ошибке API.
@@ -93,9 +97,12 @@ class TradeExecutor:
                 pass
 
         # Рассчитываем уровни SL/TP с учётом комиссий и НДФЛ:
-        # при достижении этих цен чистый P&L будет ровно ±pct от суммы входа
-        stop_loss_price = adjusted_sl_price(executed_price, trading_settings.stop_loss_pct)
-        take_profit_price = adjusted_tp_price(executed_price, trading_settings.take_profit_pct)
+        # при достижении этих цен чистый P&L будет ровно ±pct от суммы входа.
+        # Используем переданные значения (динамические ATR) или фиксированные из настроек.
+        _sl_pct = sl_pct if sl_pct is not None else trading_settings.stop_loss_pct
+        _tp_pct = tp_pct if tp_pct is not None else trading_settings.take_profit_pct
+        stop_loss_price = adjusted_sl_price(executed_price, _sl_pct)
+        take_profit_price = adjusted_tp_price(executed_price, _tp_pct)
 
         trade = Trade(
             asset_id=asset.id,
@@ -154,6 +161,8 @@ class TradeExecutor:
             trade_id=trade.id,
             entry_price=str(trade.entry_price),
             lot_size=lot_size,
+            sl_pct=round(_sl_pct, 4),
+            tp_pct=round(_tp_pct, 4),
             stop_loss=str(sl_price_rounded),
             take_profit=str(tp_price_rounded),
             tp_order_id=tp_order_id,
