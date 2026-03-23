@@ -179,6 +179,21 @@ class MLSettings(BaseSettings):
     # 4 бара совпадает с rsi_delta_4h / stoch_k_delta_4h / macd_hist_delta_4h — единая логика дельт.
     cci_delta_period: int = Field(4, alias="ML_CCI_DELTA_PERIOD")
 
+    # Параметры WalkForwardSplit (роллинговая кросс-валидация)
+    # Размер фиксированного обучающего окна (баров).
+    # 3000 баров ≈ 1.7 года при 1h-свечах — охватывает несколько режимов рынка,
+    # исключает устаревшие данные до структурного разрыва MOEX февраль 2022.
+    wf_train_size: int = Field(3000, alias="ML_WF_TRAIN_SIZE")
+    # Размер валидационного окна (баров).
+    # 500 баров ≈ 3 месяца при 1h-свечах — достаточно для надёжной оценки Spearman.
+    wf_val_size: int = Field(500, alias="ML_WF_VAL_SIZE")
+    # Embargo после каждого val-окна (баров).
+    # Метки последних барóв val зависят от lookahead барóв вперёд — без embargo
+    # эти бары попадают в следующее обучающее окно и создают утечку меток.
+    # Рекомендованный минимум: = ML_LOOKAHEAD (4). Можно увеличить до max(rolling_window)
+    # для дополнительной защиты от rolling-признаков (autocorr_returns=8, price_vol_corr=20).
+    wf_embargo: int = Field(4, alias="ML_WF_EMBARGO")
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 

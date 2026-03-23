@@ -29,12 +29,11 @@ import numpy as np
 import optuna
 import pandas as pd
 from sklearn.ensemble import ExtraTreesRegressor, HistGradientBoostingRegressor
-from sklearn.model_selection import TimeSeriesSplit
 from config.settings import data_settings, ml_settings
 from ml.dataset import load_all_tickers_from_csv, load_ticker_data, load_usdrub_data, merge_usdrub
 from ml.features import FEATURE_COLUMNS, compute_features
 from ml.labels import compute_pnl_targets
-from ml.tune import tune_extra_trees, tune_hist_gbm, tune_lgbm
+from ml.tune import WalkForwardSplit, tune_extra_trees, tune_hist_gbm, tune_lgbm
 from utils.logger import logger
 
 WEIGHTS_DIR = Path(__file__).parent / "weights"
@@ -233,13 +232,13 @@ def _evaluate_ensemble(
     ticker: str,
 ) -> float:
     """
-    Оценить ансамбль через кросс-валидацию TimeSeriesSplit с метрикой Спирмена.
+    Оценить ансамбль через WalkForwardSplit с метрикой Спирмена.
 
     Возвращает:
         Средняя корреляция Спирмена по фолдам ([-1, 1]).
     """
     from ml.tune import _cv_spearman_score
-    cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
+    cv = WalkForwardSplit()
     spearman = _cv_spearman_score(ensemble, X, y, cv)
     logger.info(
         "Оценка ансамбля (CV Spearman)",

@@ -32,7 +32,7 @@
 | `ML_THRESHOLD` | Fallback порог входа (предсказанный net P&L); per-ticker оптимизируется Optuna → `best_threshold_*.json` | `0.0` |
 | `ML_THRESHOLD_N_TRIALS` | Итераций Optuna для подбора порога входа per-ticker | `50` |
 | `ML_SHARPE_MIN_TRADES` | Минимум сделок для расчёта Sharpe ratio (меньше — штраф 0.0) | `10` |
-| `ML_N_SPLITS` | Фолдов TimeSeriesSplit при кросс-валидации | `5` |
+| `ML_N_SPLITS` | Максимальное число фолдов `WalkForwardSplit` (берутся последние N ближайших к OOS) | `5` |
 | `ML_RANDOM_STATE` | Seed для воспроизводимости (Optuna, ExtraTrees) | `42` |
 | `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `75` |
 | `ML_OPTUNA_TRIALS_ET` | Итераций Optuna для ExtraTreesRegressor | `40` |
@@ -46,6 +46,9 @@
 | `ML_PRICE_VOL_CORR_WINDOW` | Окно корреляции доходность × изменение объёма: > 0 = объём подтверждает цену, < 0 = дивергенция | `20` |
 | `ML_WILLIAMS_R_PERIOD` | Период Williams %R (TA-Lib WILLR); диапазон [-100, 0]; -20..0 = перекуплен | `14` |
 | `ML_CCI_DELTA_PERIOD` | Лаг дельты CCI (баров); аналогично `rsi_delta_4h` / `stoch_k_delta_4h` | `4` |
+| `ML_WF_TRAIN_SIZE` | Размер обучающего окна `WalkForwardSplit` (баров); 3000 ≈ 1.7 года при 1h | `3000` |
+| `ML_WF_VAL_SIZE` | Размер val-окна `WalkForwardSplit` (баров); 500 ≈ 3 месяца при 1h | `500` |
+| `ML_WF_EMBARGO` | Embargo после каждого val-окна (баров); рекомендовано ≥ `ML_LOOKAHEAD` | `4` |
 
 ## Ночное дообучение
 
