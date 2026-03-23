@@ -32,7 +32,10 @@
 | `ML_THRESHOLD` | Fallback порог входа (предсказанный net P&L); per-ticker оптимизируется Optuna → `best_threshold_*.json` | `0.0` |
 | `ML_THRESHOLD_N_TRIALS` | Итераций Optuna для подбора порога входа per-ticker | `50` |
 | `ML_SHARPE_MIN_TRADES` | Минимум сделок для расчёта Sharpe ratio (меньше — штраф 0.0) | `10` |
-| `ML_N_SPLITS` | Фолдов TimeSeriesSplit при кросс-валидации | `5` |
+| `ML_N_SPLITS` | Максимальное число walk-forward фолдов CV (используются последние N по времени) | `5` |
+| `ML_WF_TRAIN_SIZE` | Фиксированное окно обучения в барах (≈1.7 года часовых свечей MOEX) | `3000` |
+| `ML_WF_VAL_SIZE` | Окно валидации в барах (≈3 месяца = 1 квартал) | `500` |
+| `ML_WF_GAP` | Gap между train и val в барах (= `ML_LOOKAHEAD`; защита от утечки forward-признаков) | `4` |
 | `ML_RANDOM_STATE` | Seed для воспроизводимости (Optuna, ExtraTrees) | `42` |
 | `ML_OPTUNA_TRIALS_LGBM` | Итераций Optuna для LightGBM | `75` |
 | `ML_OPTUNA_TRIALS_ET` | Итераций Optuna для ExtraTreesRegressor | `40` |

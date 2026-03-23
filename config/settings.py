@@ -125,8 +125,13 @@ class MLSettings(BaseSettings):
     threshold: float = Field(0.0, alias="ML_THRESHOLD")      # 0.0 = любой положительный прогноз
 
     # Кросс-валидация
-    n_splits: int = Field(5, alias="ML_N_SPLITS")             # фолдов TimeSeriesSplit
+    n_splits: int = Field(5, alias="ML_N_SPLITS")             # максимальное число walk-forward фолдов
     random_state: int = Field(42, alias="ML_RANDOM_STATE")
+
+    # Walk-forward параметры (заменяют расширяющийся TimeSeriesSplit)
+    wf_train_size: int = Field(3000, alias="ML_WF_TRAIN_SIZE")   # фиксированное окно обучения (≈1.7 года часовых свечей)
+    wf_val_size: int = Field(500, alias="ML_WF_VAL_SIZE")         # окно валидации (≈3 месяца)
+    wf_gap: int = Field(4, alias="ML_WF_GAP")                     # gap = lookahead, защита от утечки forward-признаков
 
     # Количество итераций Optuna для подбора порога уверенности per-ticker
     threshold_n_trials: int = Field(50, alias="ML_THRESHOLD_N_TRIALS")

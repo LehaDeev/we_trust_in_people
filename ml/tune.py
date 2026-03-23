@@ -2,9 +2,15 @@
 Подбор гиперпараметров моделей ансамбля через Optuna.
 
 Для каждой модели создаётся отдельное Optuna-исследование (study).
-Оценка производится через кросс-валидацию TimeSeriesSplit(n_splits=ML_N_SPLITS)
-с метрикой средняя корреляция Спирмена между pnl_pred и реальным P&L —
+Оценка производится через роллинговую walk-forward кросс-валидацию
+WalkForwardSplit с фиксированным окном обучения (ML_WF_TRAIN_SIZE баров)
+и метрикой средняя корреляция Спирмена между pnl_pred и реальным P&L —
 чисто измеряет качество ранжирования без зависимости от порога входа.
+
+Gap (ML_WF_GAP) между train_end и val_start блокирует утечку форвард-зависимых
+признаков (autocorr_returns, price_vol_corr используют rolling-статистики).
+Используются последние ML_N_SPLITS фолдов — они репрезентативнее для оценки
+будущего качества, чем исторические фолды на устаревшем рыночном режиме.
 
 Лучшие параметры сохраняются в ml/weights/best_params_{model}_{version}.json.
 """
@@ -19,7 +25,6 @@ import optuna
 import pandas as pd
 from scipy.stats import ConstantInputWarning, spearmanr
 from sklearn.ensemble import ExtraTreesRegressor
-from sklearn.model_selection import TimeSeriesSplit
 
 from config.settings import ml_settings, trading_settings
 from utils.logger import logger
@@ -30,6 +35,88 @@ optuna.logging.set_verbosity(optuna.logging.WARNING)
 WEIGHTS_DIR = Path(__file__).parent / "weights"
 
 _BAR_WIDTH = 20
+
+
+class WalkForwardSplit:
+    """
+    Роллинговая walk-forward кросс-валидация с фиксированным окном обучения.
+
+    В отличие от расширяющегося TimeSeriesSplit каждый фолд имеет одинаковый
+    размер тренировочной выборки — скользящее окно движется вперёд с шагом val_size.
+
+    Gap между train_end и val_start исключает утечку форвард-зависимых признаков
+    (autocorr_returns, price_vol_corr используют rolling-статистики).
+
+    Используются последние n_splits фолдов — они репрезентативнее для оценки
+    будущего качества, чем исторические фолды на устаревшем рыночном режиме.
+
+    Параметры:
+        train_size: фиксированное число баров в обучающей выборке каждого фолда.
+        val_size:   число баров в валидационной выборке каждого фолда.
+        gap:        пропуск между train_end и val_start (рекомендуется = lookahead).
+        n_splits:   максимальное число фолдов (None = все возможные).
+    """
+
+    def __init__(
+        self,
+        train_size: int,
+        val_size: int,
+        gap: int,
+        n_splits: int | None = None,
+    ) -> None:
+        self.train_size = train_size
+        self.val_size = val_size
+        self.gap = gap
+        self.n_splits = n_splits
+
+    def split(
+        self,
+        X: pd.DataFrame,
+        y: Any = None,
+        groups: Any = None,
+    ):
+        """Генерировать пары (train_indices, val_indices) для каждого фолда."""
+        n = len(X)
+        min_len = self.train_size + self.gap + self.val_size
+
+        if n < min_len:
+            # Данных меньше запрошенного — один фолд с максимально доступным train
+            train_end = n - self.gap - self.val_size
+            if train_end < 1:
+                return
+            val_start = train_end + self.gap
+            yield np.arange(0, train_end), np.arange(val_start, n)
+            return
+
+        # Строим фолды слева направо, шаг = val_size
+        folds: list[tuple[np.ndarray, np.ndarray]] = []
+        start = 0
+        while True:
+            train_end = start + self.train_size
+            val_start = train_end + self.gap
+            val_end = val_start + self.val_size
+            if val_end > n:
+                break
+            folds.append((
+                np.arange(start, train_end),
+                np.arange(val_start, val_end),
+            ))
+            start += self.val_size
+
+        # Берём последние n_splits фолдов — самые свежие
+        if self.n_splits is not None:
+            folds = folds[-self.n_splits:]
+
+        yield from folds
+
+    def get_n_splits(
+        self,
+        X: Any = None,
+        y: Any = None,
+        groups: Any = None,
+    ) -> int:
+        """Вернуть количество фолдов."""
+        return self.n_splits if self.n_splits is not None else 5
 
 
 def _make_progress_callback(n_trials: int, label: str):
@@ -195,13 +282,13 @@ def _cv_spearman_score(
     model: Any,
     X: pd.DataFrame,
     y: pd.Series,
-    cv: TimeSeriesSplit,
+    cv: WalkForwardSplit,
     trial: optuna.trial.Trial | None = None,
 ) -> float:
     """
     Кросс-валидация с метрикой Спирмена: средняя ранговая корреляция pnl_pred и реального P&L.
 
-    Спирмен измеряет качество ранжирования барów — насколько порядок предсказаний
+    Спирмен измеряет качество ранжирования баров — насколько порядок предсказаний
     соответствует порядку реальных P&L. Не зависит от выбора порога входа и масштаба,
     поэтому является чистой оценкой предсказательной силы модели.
 
@@ -215,7 +302,7 @@ def _cv_spearman_score(
         model:  sklearn-совместимый регрессор.
         X:      DataFrame признаков.
         y:      Series целевых P&L значений (float).
-        cv:     экземпляр TimeSeriesSplit.
+        cv:     экземпляр WalkForwardSplit.
         trial:  Optuna trial для pruning (None = без pruning).
 
     Возвращает:
@@ -267,7 +354,12 @@ def tune_lgbm(
     """
     n_trials = n_trials or ml_settings.optuna_trials_lgbm
     version = version or ml_settings.model_version
-    cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
+    cv = WalkForwardSplit(
+        train_size=ml_settings.wf_train_size,
+        val_size=ml_settings.wf_val_size,
+        gap=ml_settings.wf_gap,
+        n_splits=ml_settings.n_splits,
+    )
 
     def objective(trial: optuna.Trial) -> float:
         params = {
@@ -357,7 +449,12 @@ def tune_extra_trees(
     """
     n_trials = n_trials or ml_settings.optuna_trials_et
     version = version or ml_settings.model_version
-    cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
+    cv = WalkForwardSplit(
+        train_size=ml_settings.wf_train_size,
+        val_size=ml_settings.wf_val_size,
+        gap=ml_settings.wf_gap,
+        n_splits=ml_settings.n_splits,
+    )
 
     def objective(trial: optuna.Trial) -> float:
         params = {
@@ -435,7 +532,12 @@ def tune_hist_gbm(
     from sklearn.ensemble import HistGradientBoostingRegressor as HGBR
     n_trials = n_trials or ml_settings.optuna_trials_hist_gbm
     version = version or ml_settings.model_version
-    cv = TimeSeriesSplit(n_splits=ml_settings.n_splits)
+    cv = WalkForwardSplit(
+        train_size=ml_settings.wf_train_size,
+        val_size=ml_settings.wf_val_size,
+        gap=ml_settings.wf_gap,
+        n_splits=ml_settings.n_splits,
+    )
 
     def objective(trial: optuna.Trial) -> float:
         params = {
