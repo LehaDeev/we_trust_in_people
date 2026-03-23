@@ -197,6 +197,11 @@ class MLSettings(BaseSettings):
     # 4 бара совпадает с rsi_delta_4h / stoch_k_delta_4h / macd_hist_delta_4h — единая логика дельт.
     cci_delta_period: int = Field(4, alias="ML_CCI_DELTA_PERIOD")
 
+    # Окно скользящего VWAP для признака rolling_vwap_dev.
+    # 20 баров ≈ 3 торговых часа при 1h-свечах MOEX. Дополняет vwap_ratio (дневной):
+    # в начале сессии они расходятся, к концу дня сходятся.
+    rolling_vwap_window: int = Field(20, alias="ML_ROLLING_VWAP_WINDOW")
+
     # Параметры WalkForwardSplit (роллинговая кросс-валидация)
     # Размер фиксированного обучающего окна (баров).
     # 3000 баров ≈ 1.7 года при 1h-свечах — охватывает несколько режимов рынка,

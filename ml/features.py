@@ -8,13 +8,14 @@
 уровня цены тикера. Это обеспечивает стационарность признаков и корректное
 дообучение при росте или падении цены со временем.
 
-Группы признаков (61 признак):
+Группы признаков (62 признака):
     - Тренд: SMA, нормализованные EMA, ADX
     - Импульс: RSI, MACD, ROC, MFI, Stochastic %K/%D, CCI, Aroon Up/Down, Williams %R
     - Импульс (дельты): изменение RSI/Stoch/MACD_hist/CCI за 4 бара — направление индикатора
     - Волатильность: Bollinger %B, ATR-ratio, ширина Bollinger, историческая волатильность
     - Объём: OBV, нормализованный объём, volume_ratio, CMF, изменения объёма
     - Ценовые отношения: close/SMA, high-low/close, SMA20/SMA50, VWAP-ratio
+    - Rolling VWAP: отклонение цены от скользящего VWAP за N баров (дополняет дневной VWAP)
     - Экстремумы: позиция цены относительно 52-недельных max/min
     - Donchian: позиция и ширина канала за 20 баров (breakout детектор)
     - Роллинг: среднее и std доходностей за 8 баров (краткосрочный режим)
@@ -57,6 +58,10 @@ FEATURE_COLUMNS: list[str] = [
     "close_sma20_ratio", "close_sma50_ratio", "high_low_ratio", "sma20_sma50_ratio",
     # VWAP-ratio: где цена относительно средневзвешенной по объёму цены дня
     "vwap_ratio",
+    # Rolling VWAP deviation: % отклонение от скользящего VWAP за ML_ROLLING_VWAP_WINDOW баров.
+    # Дополняет vwap_ratio (дневной): в начале сессии они расходятся (мало баров для daily),
+    # к концу дня сходятся. > 0 → цена выше rolling-VWAP (импульс), < 0 → ниже (коррекция).
+    "rolling_vwap_dev",
     # 52-недельные экстремумы: режим рынка (у максимума = импульс, у минимума = перепродан)
     "high_252_ratio", "low_252_ratio",
     # Donchian channel: позиция цены в 20-барном диапазоне + ширина канала
@@ -240,6 +245,22 @@ def compute_features(df: pd.DataFrame) -> pd.DataFrame:
     vwap = df["_cumtp"] / df["_cumvol"]
     df["vwap_ratio"] = np.where(vwap != 0, close / vwap, np.nan)
     df.drop(columns=["_tp_vol", "_vol", "_date", "_cumtp", "_cumvol"], inplace=True)
+
+    # ── Rolling VWAP deviation ────────────────────────────────────────────────
+    # Скользящий VWAP за ML_ROLLING_VWAP_WINDOW баров: фиксированное окно,
+    # не привязанное к торговому дню. Дополняет vwap_ratio (дневной VWAP):
+    # в начале сессии они расходятся (мало баров для daily), к концу сходятся.
+    # Отклонение в долях: > 0 → цена выше rolling-VWAP (импульс), < 0 → ниже.
+    # min_periods=window//2 устраняет NaN на первых барах (graceful start).
+    _rvwap_window = ml_settings.rolling_vwap_window
+    _tp_vol_s = pd.Series(typical_price * volume)
+    _vol_s = pd.Series(volume)
+    _rolling_tp = _tp_vol_s.rolling(_rvwap_window, min_periods=max(1, _rvwap_window // 2)).sum()
+    _rolling_vol = _vol_s.rolling(_rvwap_window, min_periods=max(1, _rvwap_window // 2)).sum()
+    _rolling_vwap = _rolling_tp / _rolling_vol.replace(0, np.nan)
+    df["rolling_vwap_dev"] = (
+        (pd.Series(close) - _rolling_vwap) / _rolling_vwap.replace(0, np.nan)
+    ).values
 
     # ── 52-недельные экстремумы ───────────────────────────────────────────────
     # Показывают режим рынка: у исторического максимума → импульс/перекупленность,
