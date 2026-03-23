@@ -12,14 +12,43 @@ RankEnsemble(
         ("hist_gbm", HistGradientBoostingRegressor(loss="absolute_error", ...)),  # MAE, медиана
     ],
 )
-# predict() → mean(z-score_lgbm, z-score_et, z-score_hist_gbm)
+# predict() → weighted_average(z-score_lgbm, z-score_et, z-score_hist_gbm, weights=_weights)
 # z-score_i = (pred_i - train_mean_i) / train_std_i
+# _weights = softmax(spearman_i / ML_ENSEMBLE_WEIGHT_TEMP)  — вычисляется на OOS-фолде
 ```
 
 **Почему `RankEnsemble`, а не `VotingRegressor`:** простое среднее (VotingRegressor) подавляется моделью
 с наибольшим диапазоном предсказаний и разбавляется моделями с константными предсказаниями.
 Z-score нормализация устраняет оба эффекта: каждая модель вносит равный вклад в ранговый сигнал,
 а модели с std≈0 автоматически получают нулевой вклад.
+
+### Адаптивные веса ансамбля (Val-fold Spearman Weighting)
+
+После финального обучения ансамбля каждая базовая модель оценивается на **последнем walk-forward фолде** (OOS):
+
+1. Клонируем базовую модель (копируем только гиперпараметры, не веса).
+2. Обучаем клон на `train_idx` фолда — модель не видела `val_idx`.
+3. Считаем `spearman_i = Spearman(model_clone.predict(X_val), y_val)`.
+4. Применяем softmax с температурой `T = ML_ENSEMBLE_WEIGHT_TEMP`:
+   ```
+   w_i = exp(spearman_i / T) / sum(exp(spearman_j / T))
+   ```
+
+**Гарантии корректности:**
+- Веса вычисляются на **val_idx** — данных, которые финальный ансамбль не видел в том же фолде.
+- Нет утечки: `_cv_spearman_score` делает независимый fit на каждом фолде.
+- Backward compatibility: старые `.pkl` без поля `_weights` используют равные веса.
+- Вырожденный случай (все Spearman ≤ 0 → все веса равные через `set_weights` фолбэк) защищён.
+
+**Влияние температуры `ML_ENSEMBLE_WEIGHT_TEMP`:**
+
+| Значение | Эффект |
+|---|---|
+| `0.1` | Winner-takes-all: лучшая модель получает почти весь вес |
+| `1.0` | Умеренная дифференциация (рекомендуется) |
+| `100.0` | Практически равные веса (поведение как до внедрения фичи) |
+
+Веса логируются в structlog после каждого обучения тикера.
 
 `StandardScaler` не используется: деревья инвариантны к монотонным преобразованиям признаков.
 

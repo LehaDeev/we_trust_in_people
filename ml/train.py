@@ -31,6 +31,7 @@ import pandas as pd
 from sklearn.ensemble import ExtraTreesRegressor, HistGradientBoostingRegressor
 from config.settings import data_settings, ml_settings
 from ml.dataset import load_all_tickers_from_csv, load_ticker_data, load_usdrub_data, merge_usdrub
+from ml.ensemble_weights import compute_ensemble_weights as _compute_ensemble_weights
 from ml.features import FEATURE_COLUMNS, compute_features
 from ml.labels import compute_pnl_targets
 from ml.tune import WalkForwardSplit, tune_extra_trees, tune_hist_gbm, tune_lgbm
@@ -252,7 +253,7 @@ def _evaluate_ensemble(
 
 class RankEnsemble:
     """
-    Ансамбль регрессоров с z-score нормализацией предсказаний перед усреднением.
+    Ансамбль регрессоров с z-score нормализацией предсказаний и адаптивными весами.
 
     Решает проблему VotingRegressor: простое среднее подавляется моделью с наибольшим
     диапазоном предсказаний, что снижает Spearman ансамбля ниже уровня лучшей модели.
@@ -260,7 +261,16 @@ class RankEnsemble:
     Алгоритм predict:
         1. Каждая модель i предсказывает вектор p_i.
         2. z_i = (p_i - train_mean_i) / train_std_i  — нормализация по обучающей статистике.
-        3. Результат = mean(z_i)  — равновзвешенное среднее нормализованных ранговых сигналов.
+        3. Результат = weighted_average(z_i, weights=_weights).
+
+    Веса _weights:
+        - По умолчанию (после fit без set_weights): равные [1/N, ..., 1/N].
+        - После set_weights(): softmax Spearman-корреляции на OOS val-фолде.
+          Модели с более высоким Spearman получают больший вес.
+        - Отрицательные Spearman обнуляются перед softmax (не штрафуются, но не вредят).
+
+    Backward compatibility: старые pkl без поля _weights работают корректно —
+    predict проверяет наличие _weights и при его отсутствии использует равные веса.
 
     Следствия z-score нормализации:
         - Модели с большим диапазоном не доминируют над моделями с малым.
@@ -277,6 +287,8 @@ class RankEnsemble:
         self._fitted: list[Any] = []
         self._means: list[float] = []
         self._stds: list[float] = []
+        # Адаптивные веса: пустой список = равные веса (backward compat. со старыми pkl)
+        self._weights: list[float] = []
 
     @property
     def estimators_(self) -> list[Any]:
@@ -293,10 +305,12 @@ class RankEnsemble:
 
         mean и std сохраняются для z-score нормализации в predict — без утечки
         данных валидационной выборки (нормализация по train-статистике).
+        Сбрасывает _weights — вызвать set_weights() после fit для адаптивных весов.
         """
         self._fitted = []
         self._means = []
         self._stds = []
+        self._weights = []
         for _name, model in self.estimators:
             model.fit(X, y)
             preds = model.predict(X)
@@ -307,13 +321,43 @@ class RankEnsemble:
             self._fitted.append(model)
         return self
 
+    def set_weights(self, weights: list[float]) -> None:
+        """
+        Установить адаптивные веса моделей ансамбля.
+
+        Нормирует переданные веса к сумме=1. Отрицательные значения обнуляются.
+        При нулевой сумме (все модели с нулевым или отрицательным Spearman)
+        устанавливает равные веса — ансамбль не деградирует.
+
+        Аргументы:
+            weights: список весов в том же порядке, что self._fitted.
+        """
+        arr = np.array(weights, dtype=float)
+        arr = np.maximum(arr, 0.0)  # отрицательный Spearman → не штрафуем, но и не используем
+        total = float(arr.sum())
+        n = len(weights)
+        if total < 1e-9:
+            # Все модели плохие — равные веса как безопасный фолбэк
+            self._weights = [1.0 / n] * n
+        else:
+            self._weights = (arr / total).tolist()
+
     def predict(self, X: pd.DataFrame | np.ndarray) -> np.ndarray:
-        """Вернуть среднее z-score предсказаний базовых моделей."""
+        """
+        Вернуть взвешенное среднее z-score предсказаний базовых моделей.
+
+        Веса берутся из _weights. Если _weights пуст (старые pkl / до вызова set_weights)
+        — использует равные веса для backward compatibility.
+        """
         z_scores = [
             (model.predict(X) - mean) / std
             for model, mean, std in zip(self._fitted, self._means, self._stds)
         ]
-        return np.mean(z_scores, axis=0)
+        # Backward compat: старые pkl не имеют _weights или имеют пустой список
+        weights = getattr(self, "_weights", [])
+        if not weights:
+            return np.mean(z_scores, axis=0)
+        return np.average(z_scores, axis=0, weights=weights)
 
 
 # ── Feature importance ───────────────────────────────────────────────────────
@@ -582,6 +626,19 @@ def _train_single_ticker(
     _print_step("Финальное обучение ансамбля...")
     ensemble.fit(X_final, y)
     _print_ok()
+
+    # ── Адаптивные веса: Spearman каждой модели на последнем OOS-фолде ────────
+    # Вычисляется ПОСЛЕ финального fit, но каждая базовая модель клонируется
+    # и обучается заново на train_idx фолда — нет утечки финального фита.
+    _print_step("Вычисление адаптивных весов ансамбля (OOS Spearman)...")
+    try:
+        adaptive_weights = _compute_ensemble_weights(ensemble, X_final, y)
+        ensemble.set_weights(adaptive_weights)
+        weights_str = ", ".join(f"{w:.3f}" for w in adaptive_weights)
+        _print_ok(f"weights=[{weights_str}]")
+    except Exception as exc:
+        logger.warning("Ошибка вычисления весов — используем равные", error=str(exc))
+        print(f" warn: {exc}", flush=True)
 
     if ml_settings.print_feature_importance:
         _print_feature_importance(ensemble, selected_features, ticker)

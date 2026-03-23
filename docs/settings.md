@@ -49,6 +49,7 @@
 | `ML_WF_TRAIN_SIZE` | Размер обучающего окна `WalkForwardSplit` (баров); 3000 ≈ 1.7 года при 1h | `3000` |
 | `ML_WF_VAL_SIZE` | Размер val-окна `WalkForwardSplit` (баров); 500 ≈ 3 месяца при 1h | `500` |
 | `ML_WF_EMBARGO` | Embargo после каждого val-окна (баров); рекомендовано ≥ `ML_LOOKAHEAD` | `4` |
+| `ML_ENSEMBLE_WEIGHT_TEMP` | Температура softmax при вычислении адаптивных весов ансамбля по OOS Spearman. `1.0` = умеренная дифференциация; `0.1` = winner-takes-all; `100.0` = равные веса | `1.0` |
 
 ## Ночное дообучение
 

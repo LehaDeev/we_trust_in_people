@@ -194,6 +194,13 @@ class MLSettings(BaseSettings):
     # для дополнительной защиты от rolling-признаков (autocorr_returns=8, price_vol_corr=20).
     wf_embargo: int = Field(4, alias="ML_WF_EMBARGO")
 
+    # Температура softmax при вычислении адаптивных весов ансамбля по Spearman OOS.
+    # Веса вычисляются на последнем walk-forward фолде: w_i = softmax(Spearman_i / temp).
+    # temp→∞ (например 100.0): равные веса (поведение как до внедрения фичи).
+    # temp→0 (например 0.1): winner-takes-all (вся масса у лучшей модели).
+    # Рекомендованный диапазон: [0.5, 2.0]. По умолчанию 1.0 — умеренная дифференциация.
+    ensemble_weight_temp: float = Field(1.0, alias="ML_ENSEMBLE_WEIGHT_TEMP")
+
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
 
