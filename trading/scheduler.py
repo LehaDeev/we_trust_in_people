@@ -129,7 +129,7 @@ from scripts.collect_candles import run_collection
 from trading import state
 from trading.executor import TradeExecutor
 from trading.notifier import notify_close, notify_insufficient_balance, notify_open
-from trading.position_sizing import compute_lots
+from trading.position_sizing import apply_confidence_scaling, compute_lots
 from trading.profitability import calculate_pnl, round_sl_to_step, round_tp_to_step
 from utils.logger import logger
 from utils.redis_cache import get_redis
@@ -708,6 +708,12 @@ class TradingScheduler:
                     # При TRADING_REGIME_FILTER_ENABLED=false — фильтр не применяется.
                     _regime: int = sig.get("market_regime", 1)
                     lots = _apply_regime_filter(lots, _regime)
+
+                    # Масштабирование по уверенности ML-сигнала (третий слой position sizing).
+                    # При TRADING_CONFIDENCE_SCALING_ENABLED=false — возвращает lots без изменений.
+                    # При lots=0 (блокировка режим-фильтра) — не вмешивается.
+                    lots = apply_confidence_scaling(lots, buy_confidence)
+
                     if lots == 0:
                         logger.info(
                             "BUY-сигнал пропущен: рыночный режим не допускает открытие позиции",

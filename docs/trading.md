@@ -264,6 +264,57 @@ BUY + volume_ratio < TRADING_VOLUME_MIN_RATIO → пропустить (лог: 
 Kelly применим после накопления 100+ закрытых сделок — до тех пор Fixed Fractional
 является стандартом в алготрейдинге (Van Tharp, «Trade Your Way to Financial Freedom»).
 
+### Масштабирование по уверенности сигнала (Confidence Scaling)
+
+При `TRADING_CONFIDENCE_SCALING_ENABLED=true` применяется **третий слой** position sizing —
+после `compute_lots()` и фильтра рыночного режима.
+
+**Три слоя sizing в порядке применения:**
+
+```
+1. compute_lots(balance, price, lot_size, sl_pct)
+       ↓
+2. _apply_regime_filter(lots, market_regime)
+       ↓
+3. apply_confidence_scaling(lots, confidence)
+       ↓
+   lots_final → open_position()
+```
+
+`confidence` = предсказанный net P&L из `predict_signal()` (доля от вложений, 0.008 = 0.8%).
+Это НЕ вероятность — регрессор выдаёт rank-оценку ожидаемой доходности.
+Типичный диапазон BUY-сигналов MOEX 1h: **0.003–0.025** (0.3%–2.5%).
+
+**Методы масштабирования:**
+
+| Метод | Входные данные | Поведение |
+|---|---|---|
+| `tiered` (рекомендуется) | confidence, tier_low, tier_high, mult_low/mid/high | 3 уровня → 3 фиксированных множителя. Простота + интерпретируемость |
+| `linear` | confidence, tier_low (baseline), mult_low/high | `mult = clamp(confidence / tier_low, mult_low, mult_high)`. Непрерывный, но чувствителен к масштабу confidence |
+| `kelly` | confidence, tier_low (proxy edge), mult_low/high | `mult = clamp(0.5 × confidence / tier_low, mult_low, mult_high)`. Half-Kelly снижает агрессивность при неточном edge |
+
+**Логика tiered (дефолт):**
+
+```
+confidence < TRADING_CONFIDENCE_TIER_LOW:               lots × TRADING_CONFIDENCE_MULT_LOW   (0.5×)
+TIER_LOW <= confidence < TRADING_CONFIDENCE_TIER_HIGH:  lots × TRADING_CONFIDENCE_MULT_MID   (1.0×)
+confidence >= TRADING_CONFIDENCE_TIER_HIGH:             lots × TRADING_CONFIDENCE_MULT_HIGH  (1.5×)
+```
+
+Результат всегда `max(1, int(lots × mult))` и не превышает `TRADING_MAX_LOTS_PER_TRADE`.
+
+**Примеры** при базовом расчёте `compute_lots()` = 4 лота:
+
+| confidence | Уровень | Метод tiered | Итог |
+|---|---|---|---|
+| 0.003 | слабый | 4 × 0.5 = 2.0 → 2 лота | ↓ |
+| 0.008 | средний | 4 × 1.0 = 4.0 → 4 лота | = |
+| 0.018 | сильный | 4 × 1.5 = 6.0 → 6 лотов | ↑ |
+
+**Backward compatibility:** при `TRADING_CONFIDENCE_SCALING_ENABLED=false` (дефолт)
+функция возвращает лоты без изменений — поведение идентично отсутствию фичи.
+При `lots = 0` (блокировка режим-фильтром) масштабирование не применяется.
+
 ### Настройки
 
 | Переменная | Описание | По умолчанию |

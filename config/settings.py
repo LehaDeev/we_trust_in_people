@@ -368,6 +368,26 @@ class TradingSettings(BaseSettings):
     # Защита от аномальных расчётов при очень большом балансе или очень узком SL.
     max_lots_per_trade: int = Field(10, alias="TRADING_MAX_LOTS_PER_TRADE")
 
+    # ── Масштабирование позиции по уверенности ML-сигнала (Confidence Scaling) ──
+    # Третий слой position sizing: применяется ПОСЛЕ compute_lots() и _apply_regime_filter().
+    # При false — функция apply_confidence_scaling() возвращает лоты без изменений.
+    confidence_scaling_enabled: bool = Field(False, alias="TRADING_CONFIDENCE_SCALING_ENABLED")
+    # Метод масштабирования:
+    # 'tiered'  — три градации уверенности → три фиксированных множителя (рекомендуется)
+    # 'linear'  — линейное масштабирование: при confidence=tier_low → mult=1.0
+    # 'kelly'   — Half-Kelly: f = 0.5 × (confidence / tier_low), зажат в [mult_low, mult_high]
+    confidence_scaling_method: str = Field("tiered", alias="TRADING_CONFIDENCE_SCALING_METHOD")
+    # Нижний порог confidence: ниже этого → mult_low (слабый сигнал)
+    confidence_tier_low: float = Field(0.005, alias="TRADING_CONFIDENCE_TIER_LOW")
+    # Верхний порог confidence: выше этого → mult_high (сильный сигнал)
+    confidence_tier_high: float = Field(0.012, alias="TRADING_CONFIDENCE_TIER_HIGH")
+    # Множитель лотов при низкой уверенности (confidence < tier_low)
+    confidence_mult_low: float = Field(0.5, alias="TRADING_CONFIDENCE_MULT_LOW")
+    # Множитель лотов при средней уверенности (tier_low <= confidence < tier_high)
+    confidence_mult_mid: float = Field(1.0, alias="TRADING_CONFIDENCE_MULT_MID")
+    # Множитель лотов при высокой уверенности (confidence >= tier_high)
+    confidence_mult_high: float = Field(1.5, alias="TRADING_CONFIDENCE_MULT_HIGH")
+
     # ── Фильтр рыночного режима (market_regime) ─────────────────────────────
     # Включить фильтр режима рынка при открытии BUY-позиций.
     # При false — фильтр отключён, лоты не изменяются (backward compatibility).

@@ -111,6 +111,13 @@
 | `TRADING_REGIME_FILTER_ENABLED` | Включить фильтр рыночного режима при открытии BUY. `false` = отключить (backward compat) | `true` |
 | `TRADING_REGIME_FILTER_MODE` | `soft` = уменьшать лоты в флете; `hard` = блокировать BUY в флете и даунтренде | `soft` |
 | `TRADING_REGIME_FLAT_MULTIPLIER` | Множитель лотов в флете при режиме `soft`. `0.5` = вдвое меньше; `0.0` = блокировать; `1.0` = без ограничений | `0.5` |
+| `TRADING_CONFIDENCE_SCALING_ENABLED` | Включить масштабирование позиции по уверенности ML-сигнала (третий слой position sizing). `false` = отключить (backward compat) | `false` |
+| `TRADING_CONFIDENCE_SCALING_METHOD` | Метод масштабирования: `tiered` — три уровня → три множителя (рекомендуется); `linear` — пропорционально confidence; `kelly` — Half-Kelly | `tiered` |
+| `TRADING_CONFIDENCE_TIER_LOW` | Нижний порог confidence (predicted net P&L): ниже → `MULT_LOW`. Типичный диапазон BUY: 0.003–0.025 | `0.005` |
+| `TRADING_CONFIDENCE_TIER_HIGH` | Верхний порог confidence: выше → `MULT_HIGH` | `0.012` |
+| `TRADING_CONFIDENCE_MULT_LOW` | Множитель лотов при низкой уверенности (`confidence < TIER_LOW`) | `0.5` |
+| `TRADING_CONFIDENCE_MULT_MID` | Множитель лотов при средней уверенности (`TIER_LOW <= confidence < TIER_HIGH`) | `1.0` |
+| `TRADING_CONFIDENCE_MULT_HIGH` | Множитель лотов при высокой уверенности (`confidence >= TIER_HIGH`) | `1.5` |
 
 ## Приложение
 
