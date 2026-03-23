@@ -34,6 +34,7 @@ from ml.dataset import load_all_tickers_from_csv, load_ticker_data, load_usdrub_
 from ml.ensemble_weights import compute_ensemble_weights as _compute_ensemble_weights
 from ml.features import FEATURE_COLUMNS, compute_features
 from ml.labels import compute_pnl_targets
+from ml.feature_selection import select_features
 from ml.tune import WalkForwardSplit, tune_extra_trees, tune_hist_gbm, tune_lgbm
 from utils.logger import logger
 
@@ -360,25 +361,20 @@ class RankEnsemble:
         return np.average(z_scores, axis=0, weights=weights)
 
 
-# ── Feature importance ───────────────────────────────────────────────────────
+# ── Feature importance (вывод для отладки) ────────────────────────────────────
 
-def _avg_importance(
+def _avg_importance_for_print(
     ensemble: RankEnsemble,
     feature_names: list[str],
 ) -> dict[str, float]:
     """
-    Вычислить нормализованную важность признаков — среднее по всем моделям ансамбля.
+    Вычислить нормализованную impurity importance для вывода таблицы (только для ML_PRINT_FEATURE_IMPORTANCE).
 
-    LightGBM считает сплиты (сотни), RF — долю Gini (0–1).
-    Каждая модель нормализуется к сумме=1 перед усреднением,
-    чтобы LightGBM не доминировал из-за больших абсолютных значений.
-
-    Возвращает:
-        Словарь {feature_name: avg_importance}.
+    Нормализует каждую модель к сумме=1 и усредняет — для наглядного вывода в консоль.
+    Не используется при отборе признаков (метод задаётся ML_FEATURE_SELECTION_METHOD).
     """
     raw_per_model: list[dict[str, float]] = []
     for model in ensemble.estimators_:
-        # estimators_ содержит модели напрямую (Pipeline удалён — StandardScaler не нужен деревьям)
         if not hasattr(model, "feature_importances_"):
             continue
         raw = dict(zip(feature_names, model.feature_importances_.astype(float)))
@@ -394,33 +390,13 @@ def _avg_importance(
     }
 
 
-def _select_by_threshold(
-    ensemble: RankEnsemble,
-    feature_names: list[str],
-    threshold: float,
-) -> list[str]:
-    """
-    Выбрать признаки с нормализованной importance >= threshold.
-
-    Порядок сохраняется из feature_names (по убыванию importance внутри).
-    Если threshold <= 0 или все признаки ниже порога — вернуть все признаки.
-    """
-    if threshold <= 0.0:
-        return list(feature_names)
-
-    avg_imp = _avg_importance(ensemble, feature_names)
-    selected = [f for f in feature_names if avg_imp[f] >= threshold]
-    # Фолбэк: если порог слишком высокий и отфильтровал всё — берём все
-    return selected if selected else list(feature_names)
-
-
 def _print_feature_importance(
     ensemble: RankEnsemble,
     feature_names: list[str],
     ticker: str,
 ) -> None:
     """Вывести все признаки по убыванию нормализованной importance."""
-    avg_imp = _avg_importance(ensemble, feature_names)
+    avg_imp = _avg_importance_for_print(ensemble, feature_names)
     sorted_feats = sorted(avg_imp.items(), key=lambda x: x[1], reverse=True)
 
     max_imp = sorted_feats[0][1] if sorted_feats else 1.0
@@ -561,13 +537,18 @@ def _train_single_ticker(
         )
 
     all_features = X.columns.tolist()
+    method = ml_settings.feature_selection_method
     threshold = ml_settings.feature_importance_threshold
 
-    # ── Проход 1: отбор признаков по importance обученных моделей ─────────────
-    # Зондовый ансамбль (с HPO-параметрами) обучается на всех 54 признаках →
-    # отбрасывает слабые → X_final. CV и финальный фит на X_final.
+    # ── Проход 1: отбор признаков ─────────────────────────────────────────────
+    # При method="permutation": зондовый ансамбль обучается на последнем train-фолде,
+    # permutation importance вычисляется на последнем val-фолде (OOS) → нет утечки.
+    # При method="importance": зондовый фит на полных данных, нормализованная impurity importance.
+    # При method="none" или threshold=0: отбор пропускается.
     features_path = WEIGHTS_DIR / f"features_{ticker_version}.json"
-    if threshold > 0.0:
+    do_selection = method != "none" and (threshold > 0.0 or ml_settings.feature_top_k > 0)
+
+    if do_selection:
         cached_features: list[str] | None = None
         if not force_tune and features_path.exists():
             try:
@@ -581,10 +562,28 @@ def _train_single_ticker(
             _print_cached("Отбор признаков")
             selected_features = cached_features
         else:
-            _print_step(f"Отбор признаков (проход 1 из 2, порог >={threshold})...")
+            _print_step(
+                f"Отбор признаков ({method}, проход 1 из 2)..."
+            )
+            # Получаем последний WalkForward-фолд для OOS-оценки при permutation
+            wf_splits = list(WalkForwardSplit().split(X))
+            last_train_idx, last_val_idx = wf_splits[-1]
+
+            # Зондовый ансамбль: при permutation — только на train-фолде;
+            # при importance — на всех данных (как раньше, допустима "утечка" для отбора)
             probe = _make_ensemble()
-            probe.fit(X, y)
-            selected_features = _select_by_threshold(probe, all_features, threshold)
+            if method == "permutation":
+                probe.fit(X.iloc[last_train_idx], y.iloc[last_train_idx])
+            else:
+                probe.fit(X, y)
+
+            selected_features = select_features(
+                ensemble=probe,
+                X=X,
+                y=y,
+                last_train_idx=last_train_idx,
+                last_val_idx=last_val_idx,
+            )
             dropped = len(all_features) - len(selected_features)
             _print_ok(f"{len(selected_features)} из {len(all_features)} признаков (-{dropped})")
             del probe

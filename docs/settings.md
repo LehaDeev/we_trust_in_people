@@ -39,6 +39,9 @@
 | `ML_OPTUNA_TRIALS_HIST_GBM` | Итераций Optuna для HistGradientBoostingRegressor | `40` |
 | `ML_FEATURE_IMPORTANCE_THRESHOLD` | Порог importance для отбора признаков per-ticker (`0.0` = отключить) | `0.01` |
 | `ML_PRINT_FEATURE_IMPORTANCE` | Выводить таблицу важности признаков после обучения | `false` |
+| `ML_FEATURE_SELECTION_METHOD` | Метод отбора признаков: `"permutation"` (OOS, рекомендуется), `"importance"` (legacy impurity), `"none"` (отключить) | `permutation` |
+| `ML_PERMUTATION_N_REPEATS` | Количество повторов перемешивания на признак при `permutation`; больше = стабильнее, но дольше | `10` |
+| `ML_FEATURE_TOP_K` | Ограничить топ-N признаков по importance (`0` = не ограничивать, использовать `ML_FEATURE_IMPORTANCE_THRESHOLD`) | `0` |
 | `ML_FORCE_TUNE` | Принудительный перезапуск Optuna | `false` |
 | `ML_MIN_CANDLES_PREDICT` | Минимум свечей для инференса | `250` |
 | `ML_MODEL_CACHE_SIZE` | Макс. число моделей в RAM одновременно (LRU). `1` = ~100 MB, `10` = ~1.1 GB. Увеличивать только при 4+ GB RAM | `1` |

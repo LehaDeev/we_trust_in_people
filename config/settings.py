@@ -150,6 +150,24 @@ class MLSettings(BaseSettings):
     # 0.0 = отключить отбор (использовать все признаки).
     feature_importance_threshold: float = Field(0.01, alias="ML_FEATURE_IMPORTANCE_THRESHOLD")
 
+    # Метод отбора признаков per-ticker.
+    # "permutation" — OOS Permutation Importance на последнем WalkForward-фолде
+    #                 (рекомендуется): напрямую измеряет вклад в Spearman, нет утечки.
+    # "importance"  — legacy: нормализованная impurity importance по трём моделям ансамбля.
+    #                 Быстрее, но нестабильнее и с bias к высококардинальным признакам.
+    # "none"        — отбор отключён, используются все признаки.
+    feature_selection_method: str = Field("permutation", alias="ML_FEATURE_SELECTION_METHOD")
+
+    # Количество повторов перемешивания на признак при permutation importance.
+    # Больше повторов → стабильнее оценка, но дольше (линейно).
+    # 10 повторов × 58 признаков × ~500 val-баров ≈ 1–2 мин на тикер.
+    permutation_n_repeats: int = Field(10, alias="ML_PERMUTATION_N_REPEATS")
+
+    # Ограничение числа отбираемых признаков (top-N по importance).
+    # 0 = не ограничивать — использовать ML_FEATURE_IMPORTANCE_THRESHOLD.
+    # > 0 = взять ровно N лучших признаков (игнорирует порог threshold).
+    feature_top_k: int = Field(0, alias="ML_FEATURE_TOP_K")
+
     # Выводить таблицу важности признаков после обучения каждого тикера.
     # Полезно при ручном запуске train_model для анализа. При работе бота
     # (ночное переобучение) вывод не нужен — установить в false.

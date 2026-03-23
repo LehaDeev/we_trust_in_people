@@ -75,25 +75,58 @@ Z-score нормализация устраняет оба эффекта: ка�
 
 ## Per-ticker отбор признаков
 
+Метод отбора задаётся переменной `ML_FEATURE_SELECTION_METHOD`.
+
+### Метод по умолчанию: OOS Permutation Importance (`permutation`)
+
 Обучение проходит в **два прохода**:
 
-1. **HPO (Optuna)** — гиперпараметры трёх моделей подбираются на **всех 54 признаках**.
-   Деревья сами игнорируют слабые признаки через регуляризацию (`min_split_gain`,
-   `min_impurity_decrease`, `l2_regularization`) — отбор на этом этапе не нужен.
+1. **HPO (Optuna)** — гиперпараметры трёх моделей подбираются на **всех 58 признаках**.
+   Деревья сами игнорируют слабые признаки через регуляризацию — отбор на этом этапе не нужен.
 
-2. **Проход 1** — зондовый `fit` ансамбля с HPO-параметрами на всех 54 признаках.
-   Вычисляется нормализованная importance (per-model к сумме = 1, затем усредняется).
-   Признаки с `avg_importance < ML_FEATURE_IMPORTANCE_THRESHOLD` отбрасываются.
+2. **Проход 1 — отбор признаков:**
+   - Зондовый ансамбль обучается на **последнем train-фолде** `WalkForwardSplit`.
+   - Для каждого признака измеряется **падение Spearman-корреляции** при перемешивании его
+     значений в **последнем val-фолде** (OOS, `n_repeats = ML_PERMUTATION_N_REPEATS`).
+   - Importance нормализуется к `[0, 1]`.
+   - Признаки с `importance < ML_FEATURE_IMPORTANCE_THRESHOLD` отбрасываются.
+     Если задан `ML_FEATURE_TOP_K > 0` — берётся ровно N лучших признаков.
+   - **Нет утечки**: оценка только на val-данных, которые модель не видела при обучении.
 
-3. **Проход 2** — оптимизация порога уверенности (Optuna, без утечки) и финальный `fit`
+3. **Проход 2** — оптимизация порога уверенности (Optuna) и финальный `fit`
    только на отобранных признаках. Список сохраняется в `features_{ticker}_{version}.json`.
+
+**Почему Permutation Importance лучше Impurity Importance:**
+
+| Свойство | Impurity (legacy) | Permutation (OOS) |
+|---|---|---|
+| Утечка данных | фит на всех данных | val-фолд, OOS |
+| Связь с метрикой | impurity/Gini — косвенно | Spearman напрямую |
+| Bias к высококардинальным | да | нет |
+| Стабильность | низкая | выше (n_repeats) |
+| Коррелированные признаки | делит importance | честнее при перемешивании |
+| Скорость | быстрее | ~1–2 мин на тикер (58 × 10 повторов) |
+
+### Legacy-метод: Impurity Importance (`importance`)
+
+Зондовый фит на **всех данных** тикера (утечка допустима только для отбора).
+Нормализованная importance per-model к сумме=1, затем среднее по 3 моделям.
+Признаки с `avg_importance < ML_FEATURE_IMPORTANCE_THRESHOLD` отбрасываются.
+Выбирается через `.env`: `ML_FEATURE_SELECTION_METHOD=importance`.
+
+### Отключение отбора (`none`)
+
+`ML_FEATURE_SELECTION_METHOD=none` или `ML_FEATURE_IMPORTANCE_THRESHOLD=0.0` —
+используются все 58 признаков без фильтрации.
+
+---
 
 Каждый тикер получает **свой** набор признаков:
 
 ```
-features_SBER_v2.json  → ["OBV", "cmf_20", "vwap_ratio", ...]   # 32 признака
-features_LKOH_v2.json  → ["high_252_ratio", "MACD_hist", ...]   # 40 признаков
-features_YDEX_v2.json  → ["hist_vol_20", "donchian_pct", ...]   # 37 признаков
+features_SBER_v2.json  → ["OBV", "cmf_20", "vwap_ratio", ...]   # ~30–45 признаков
+features_LKOH_v2.json  → ["high_252_ratio", "MACD_hist", ...]
+features_YDEX_v2.json  → ["hist_vol_20", "donchian_pct", ...]
 ```
 
 Инференс загружает `features_{ticker}_{version}.json` автоматически — изменений в коде не требуется.
