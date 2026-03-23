@@ -343,6 +343,20 @@ class TradingSettings(BaseSettings):
     # Максимальный SL при динамическом расчёте (защита от чрезмерных убытков при кризисе).
     atr_max_sl_pct: float = Field(0.05, alias="TRADING_ATR_MAX_SL_PCT")
 
+    # ── Управление размером позиции (Position Sizing) ───────────────────────────
+    # Метод расчёта количества лотов на сделку:
+    # 'fixed_risk' — лоты масштабируются так, чтобы при срабатывании SL потеря
+    #                была ровно risk_pct_per_trade × balance (рекомендуется).
+    # 'fixed_lots' — всегда lots_per_ticker лотов (старое поведение, обратная совместимость).
+    position_sizing: str = Field("fixed_risk", alias="TRADING_POSITION_SIZING")
+    # Максимальная доля баланса, которую рискуем потерять в одной сделке.
+    # При срабатывании SL фактический убыток = balance × risk_pct_per_trade.
+    # Стандартный диапазон: 0.005 (0.5%) — 0.02 (2%). Рекомендуется 0.01 (1%).
+    risk_pct_per_trade: float = Field(0.01, alias="TRADING_RISK_PCT_PER_TRADE")
+    # Жёсткий максимум лотов на одну сделку.
+    # Защита от аномальных расчётов при очень большом балансе или очень узком SL.
+    max_lots_per_trade: int = Field(10, alias="TRADING_MAX_LOTS_PER_TRADE")
+
     @property
     def dividend_override(self) -> dict[str, int]:
         """Парсит SBER:45,GAZP:90 → {"SBER": 45, "GAZP": 90}."""

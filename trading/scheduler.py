@@ -92,6 +92,7 @@ from scripts.collect_candles import run_collection
 from trading import state
 from trading.executor import TradeExecutor
 from trading.notifier import notify_close, notify_insufficient_balance, notify_open
+from trading.position_sizing import compute_lots
 from trading.profitability import calculate_pnl, round_sl_to_step, round_tp_to_step
 from utils.logger import logger
 from utils.redis_cache import get_redis
@@ -654,9 +655,18 @@ class TradingScheduler:
                     # Получаем размер лота через API (с graceful degradation)
                     lot_size = await _get_lot_size(ticker)
 
+                    # Вычисляем динамические SL/TP на основе ATR-волатильности сигнала.
+                    # Выполняем ДО расчёта лотов — sl_pct нужен для compute_lots.
+                    # При TRADING_DYNAMIC_SLTP_ENABLED=false возвращает фиксированные значения.
+                    _atr_ratio: float = sig.get("atr_ratio", 0.0)
+                    _sl_pct, _tp_pct = _compute_dynamic_sltp(_atr_ratio)
+
+                    # Рассчитываем число лотов по методу Fixed Fractional Risk.
+                    # При TRADING_POSITION_SIZING='fixed_lots' — возвращает lots_per_ticker.
+                    lots = compute_lots(rub_balance, current_price, lot_size, _sl_pct)
+                    needed = current_price * Decimal(lots) * Decimal(lot_size)
+
                     # Проверяем баланс перед выставлением ордера
-                    lots = trading_settings.lots_per_ticker
-                    needed = current_price * lots * lot_size
                     if rub_balance < needed:
                         logger.warning(
                             "BUY-сигнал пропущен: недостаточно средств",
@@ -667,11 +677,6 @@ class TradingScheduler:
                         await notify_insufficient_balance(ticker, needed, rub_balance)
                         continue
 
-                    # Вычисляем динамические SL/TP на основе ATR-волатильности сигнала.
-                    # При TRADING_DYNAMIC_SLTP_ENABLED=false возвращает фиксированные значения.
-                    _atr_ratio: float = sig.get("atr_ratio", 0.0)
-                    _sl_pct, _tp_pct = _compute_dynamic_sltp(_atr_ratio)
-
                     new_trade = await self._executor.open_position(
                         session=session,
                         asset=asset,
@@ -680,6 +685,7 @@ class TradingScheduler:
                         lot_size=lot_size,
                         sl_pct=_sl_pct,
                         tp_pct=_tp_pct,
+                        lots=lots,
                     )
                     if new_trade:
                         open_by_asset[asset.id] = new_trade

@@ -85,7 +85,10 @@
 |---|---|---|
 | `TRADING_ENABLED` | Включить автоторговлю | `false` |
 | `TRADING_CONFIDENCE_THRESHOLD` | Fallback мин. предсказанный net P&L для открытия позиции (per-ticker задаётся Optuna в `best_threshold_*.json`) | `0.0` |
-| `TRADING_LOTS_PER_TICKER` | Лотов на каждую сделку | `1` |
+| `TRADING_LOTS_PER_TICKER` | Лотов на каждую сделку (используется при `TRADING_POSITION_SIZING=fixed_lots`) | `1` |
+| `TRADING_POSITION_SIZING` | Метод расчёта лотов: `fixed_risk` — масштабировать по риску (рекомендуется), `fixed_lots` — всегда `lots_per_ticker` | `fixed_risk` |
+| `TRADING_RISK_PCT_PER_TRADE` | Доля баланса, которую рискуем потерять в одной сделке при срабатывании SL (`0.01` = 1%). Стандартный диапазон: 0.5%–2% | `0.01` |
+| `TRADING_MAX_LOTS_PER_TRADE` | Жёсткий максимум лотов на одну сделку (защита от аномальных расчётов) | `10` |
 | `TRADING_STOP_LOSS_PCT` | Целевой чистый убыток для стоп-лосса (после комиссий) | `0.03` |
 | `TRADING_TAKE_PROFIT_PCT` | Целевая чистая прибыль для тейк-профита (после комиссий и НДФЛ) | `0.05` |
 | `TRADING_MAX_POSITIONS` | Макс. одновременных позиций | `5` |

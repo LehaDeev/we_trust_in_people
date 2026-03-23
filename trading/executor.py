@@ -45,6 +45,7 @@ class TradeExecutor:
         lot_size: int = 1,
         sl_pct: float | None = None,
         tp_pct: float | None = None,
+        lots: int | None = None,
     ) -> Trade | None:
         """
         Открыть длинную позицию по рыночной цене.
@@ -60,16 +61,18 @@ class TradeExecutor:
             lot_size:       количество бумаг в 1 лоте
             sl_pct:         целевой чистый убыток для SL (доля; None = взять из trading_settings)
             tp_pct:         целевая чистая прибыль для TP (доля; None = взять из trading_settings)
+            lots:           число лотов для покупки; None = взять из trading_settings.lots_per_ticker
+                            (обратная совместимость с ручным режимом и тестами)
 
         Возвращает:
             Trade с status='OPEN' при успехе, None при ошибке API.
         """
-        lots = trading_settings.lots_per_ticker
+        _lots = lots if lots is not None else trading_settings.lots_per_ticker
 
         logger.info(
             "Открываем позицию",
             ticker=asset.ticker,
-            lots=lots,
+            lots=_lots,
             lot_size=lot_size,
             price=str(current_price),
         )
@@ -77,7 +80,7 @@ class TradeExecutor:
         try:
             response = await post_market_order(
                 instrument_id=instrument_uid,
-                quantity=lots,
+                quantity=_lots,
                 direction=OrderDirection.ORDER_DIRECTION_BUY,
             )
         except Exception as e:
@@ -107,7 +110,7 @@ class TradeExecutor:
         trade = Trade(
             asset_id=asset.id,
             order_id=response.order_id,
-            lots=lots,
+            lots=_lots,
             lot_size=lot_size,
             entry_price=executed_price,
             stop_loss_price=stop_loss_price,
@@ -133,7 +136,7 @@ class TradeExecutor:
         try:
             tp_order_id = (await post_limit_order(
                 instrument_id=instrument_uid,
-                quantity=lots,
+                quantity=_lots,
                 price=tp_price_rounded,
                 direction=OrderDirection.ORDER_DIRECTION_SELL,
             )).order_id
@@ -143,7 +146,7 @@ class TradeExecutor:
         try:
             sl_stop_order_id = await post_stop_order(
                 instrument_id=instrument_uid,
-                quantity=lots,
+                quantity=_lots,
                 stop_price=sl_price_rounded,
                 direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
             )
@@ -160,7 +163,9 @@ class TradeExecutor:
             ticker=asset.ticker,
             trade_id=trade.id,
             entry_price=str(trade.entry_price),
+            lots=_lots,
             lot_size=lot_size,
+            position_value=str(executed_price * _lots * lot_size),
             sl_pct=round(_sl_pct, 4),
             tp_pct=round(_tp_pct, 4),
             stop_loss=str(sl_price_rounded),
