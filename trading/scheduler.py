@@ -385,14 +385,22 @@ class TradingScheduler:
                         )
                         continue
 
-                    closed_trade = await self._executor.close_position(
-                        session=session,
-                        trade=trade,
-                        asset=asset,
-                        instrument_uid=figi,
-                        current_price=current_price,
-                        reason="SELL_SIGNAL",
-                    )
+                    try:
+                        closed_trade = await self._executor.close_position(
+                            session=session,
+                            trade=trade,
+                            asset=asset,
+                            instrument_uid=figi,
+                            current_price=current_price,
+                            reason="SELL_SIGNAL",
+                        )
+                    except Exception as close_err:
+                        logger.error(
+                            "Ошибка закрытия позиции по SELL-сигналу — сделка остаётся открытой в БД",
+                            ticker=ticker,
+                            error=str(close_err),
+                        )
+                        continue
                     open_by_asset.pop(asset.id, None)
                     open_count -= 1
                     # Пересчитываем breakdown от фактической цены исполнения
