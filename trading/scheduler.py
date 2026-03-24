@@ -848,8 +848,8 @@ async def _check_trade_orders(
                 logger.error("Не удалось перевыставить SL стоп-ордер",
                              ticker=asset.ticker, error=str(re_e))
 
-    # ── Нет ни TP ни SL — выставляем оба ─────────────────────────────────────
-    if close_reason is None and not trade.tp_stop_order_id and not trade.tp_order_id and not trade.sl_stop_order_id:
+    # ── Нет TP (SL может уже быть) — выставляем недостающие ордера ──────────
+    if close_reason is None and not trade.tp_stop_order_id and not trade.tp_order_id:
         try:
             price_step = await get_min_price_increment(figi)
             tp_rounded = round_tp_to_step(trade.take_profit_price, price_step)
