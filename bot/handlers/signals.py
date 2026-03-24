@@ -56,24 +56,19 @@ def _format_signal(result: dict) -> str:
 
     emoji = _SIGNAL_EMOJI.get(signal, "⚪")
 
-    # Процент от порога: насколько текущий сигнал близок к срабатыванию
-    if threshold != 0:
-        pct_of_threshold = confidence / threshold * 100
-    else:
-        pct_of_threshold = 100.0 if confidence >= 0 else 0.0
     if signal == "SELL":
         # SELL: pnl_pred < 0, сила сигнала неприменима
         extra_lines = ["Модель ожидает снижение"]
     elif passes_threshold:
         extra_lines = [
-            f"Сила сигнала: <b>{pct_of_threshold:.0f}%</b>  {threshold_mark}",
-            "Порог пройден ✅",
+            f"Z-score: <b>{confidence:.3f}</b>  {threshold_mark}",
+            f"Порог: <b>{threshold:.4f}</b>  ✅",
         ]
     else:
-        missing = 100 - pct_of_threshold
+        margin = threshold - confidence  # насколько не хватает до порога
         extra_lines = [
-            f"Сила сигнала: <b>{pct_of_threshold:.0f}%</b> из 100  {threshold_mark}",
-            f"Не хватает:  <b>{missing:.0f}%</b>",
+            f"Z-score: <b>{confidence:.3f}</b>  {threshold_mark}",
+            f"Порог: <b>{threshold:.4f}</b>  (не хватает {margin:.4f})",
         ]
 
     lines = [
