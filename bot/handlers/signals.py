@@ -56,23 +56,19 @@ def _format_signal(result: dict) -> str:
 
     emoji = _SIGNAL_EMOJI.get(signal, "⚪")
 
-    # Сила сигнала: насколько confidence выше порога.
-    # margin=0 → ровно на пороге (0%), margin=1.0 → очень сильный (100%).
-    # Для "не прошёл": показываем насколько близко к порогу.
-    _MAX_MARGIN = 1.0
     if signal == "SELL":
         # SELL: pnl_pred < 0, сила сигнала неприменима
         extra_lines = ["Модель ожидает снижение"]
     elif passes_threshold:
-        margin = confidence - threshold
-        strength_pct = min(100, max(1, int(margin / _MAX_MARGIN * 100)))
+        # Порог пройден — сигнал квалифицирован для BUY → всегда 100%
         extra_lines = [
-            f"Сила сигнала: <b>{strength_pct}%</b>  {threshold_mark}",
+            f"Сила сигнала: <b>100%</b>  ✅",
             "Порог пройден ✅",
         ]
     else:
+        # Не прошёл: показываем прогресс к порогу (0–99%)
         gap = threshold - confidence
-        progress_pct = max(0, int((1 - gap / _MAX_MARGIN) * 100))
+        progress_pct = max(0, min(99, 100 - int(gap / 1.0 * 100)))
         extra_lines = [
             f"Сила сигнала: <b>{progress_pct}%</b> из 100  {threshold_mark}",
             f"Не хватает:  <b>{gap:.4f}</b>",
