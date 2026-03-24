@@ -25,7 +25,7 @@ from utils.logger import logger
 
 if TYPE_CHECKING:
     # Импорт только для type hints — избегаем циклического импорта
-    from ml.train import RankEnsemble
+    from ml.ensemble import RankEnsemble
 
 
 def _spearman_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:

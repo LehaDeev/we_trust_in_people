@@ -20,7 +20,7 @@ from utils.logger import logger
 if TYPE_CHECKING:
     import pandas as pd
 
-    from ml.train import RankEnsemble
+    from ml.ensemble import RankEnsemble
 
 
 def compute_ensemble_weights(
@@ -48,7 +48,7 @@ def compute_ensemble_weights(
     Возвращает:
         Список весов длиной len(ensemble.estimators_), sum=1.
     """
-    from ml.tune import WalkForwardSplit
+    from ml.walk_forward import WalkForwardSplit
 
     n_models = len(ensemble.estimators_)
     equal_weights = [1.0 / n_models] * n_models
