@@ -95,8 +95,10 @@ class Trade(Base):
     take_profit_price: Mapped[Decimal] = mapped_column(Numeric(18, 6))
     # Статус: "OPEN" или "CLOSED"
     status: Mapped[str] = mapped_column(String(10), index=True, default="OPEN")
-    # ID лимитного ордера на тейк-профит (None если не выставлен на бирже)
+    # ID лимитного ордера на тейк-профит (устаревшее: старые позиции, выставленные до перехода на стоп-TP)
     tp_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    # ID стоп-ордера на тейк-профит (STOP_ORDER_TYPE_TAKE_PROFIT — не блокирует акции)
+    tp_stop_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # ID стоп-ордера на стоп-лосс (None если не выставлен на бирже)
     sl_stop_order_id: Mapped[str | None] = mapped_column(String(100), nullable=True)
     # Причина закрытия: "SELL_SIGNAL" | "STOP_LOSS" | "TAKE_PROFIT" | None

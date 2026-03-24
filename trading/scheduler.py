@@ -123,8 +123,9 @@ from tinkoff.dividend_gap_stats import get_gap_protection_days_bulk
 from tinkoff.dividends import get_dividend_drops_bulk
 from tinkoff.instruments import get_instrument_by_ticker
 from tinkoff.market_data import get_last_prices, get_min_price_increment
-from tinkoff.portfolio import get_active_order_ids, get_order_state, get_rub_balance, get_stop_order_ids, post_limit_order, post_stop_order
-from t_tech.invest.schemas import OrderDirection, OrderExecutionReportStatus, StopOrderDirection
+from tinkoff.portfolio import get_active_order_ids, get_order_state, get_rub_balance, get_stop_order_ids, post_stop_order
+from t_tech.invest.schemas import StopOrderType
+from t_tech.invest.schemas import OrderExecutionReportStatus, StopOrderDirection
 from scripts.collect_candles import run_collection
 from trading import state
 from trading.executor import TradeExecutor
@@ -281,7 +282,9 @@ class TradingScheduler:
 
                 # ── 5. Проверяем SL/TP (всегда, независимо от рентабельности) ─
 
-                # Получаем ID активных ордеров один раз для всех позиций
+                # Получаем ID активных ордеров один раз для всех позиций.
+                # stop_ids содержит ОБА типа: TP-стоп-ордера и SL-стоп-ордера.
+                # limit_orders_fetched нужен только для backward compat с legacy tp_order_id.
                 active_stop_ids: set[str] = set()
                 active_order_ids: set[str] = set()
                 stop_orders_fetched: bool = False
@@ -291,11 +294,15 @@ class TradingScheduler:
                     stop_orders_fetched = True
                 except Exception as e:
                     logger.warning("Не удалось получить список стоп-ордеров", error=str(e))
-                try:
-                    active_order_ids = await get_active_order_ids()
-                    limit_orders_fetched = True
-                except Exception as e:
-                    logger.warning("Не удалось получить список лимитных ордеров", error=str(e))
+
+                # Лимитные ордера нужны только для старых позиций с tp_order_id (legacy)
+                has_legacy_tp = any(t.tp_order_id for t in open_trades)
+                if has_legacy_tp:
+                    try:
+                        active_order_ids = await get_active_order_ids()
+                        limit_orders_fetched = True
+                    except Exception as e:
+                        logger.warning("Не удалось получить список лимитных ордеров", error=str(e))
 
                 for trade in open_trades:
                     figi = asset_id_to_figi.get(trade.asset_id)
@@ -309,180 +316,19 @@ class TradingScheduler:
                     if not asset:
                         continue
 
-                    close_reason: str | None = None
-                    tp_fill_price: Decimal | None = None
-
-                    # Приоритет: проверка биржевых ордеров (если были выставлены)
-                    if trade.tp_order_id:
-                        # Если список активных ордеров получен и TP в нём отсутствует —
-                        # ордер либо исполнился, либо истёк (конец сессии)
-                        tp_gone = limit_orders_fetched and trade.tp_order_id not in active_order_ids
-                        if tp_gone:
-                            try:
-                                tp_status, tp_fill_price = await get_order_state(trade.tp_order_id)
-                                if tp_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL:
-                                    close_reason = "TAKE_PROFIT"
-                            except Exception:
-                                pass  # ордер заархивирован — считаем истёкшим
-
-                            # Не FILL (истёк или заархивирован) — перевыставляем TP если сессия открыта
-                            if close_reason != "TAKE_PROFIT":
-                                if not _is_moex_session_open():
-                                    # Очищаем ID чтобы утром гарантированно попасть в ветку
-                                    # повторного выставления TP при открытии сессии
-                                    trade.tp_order_id = None
-                                    await trade_repo.update_trade(session, trade)
-                                    logger.debug(
-                                        "TP ордер исчез, биржа закрыта — ID очищен, перевыставим при открытии сессии",
-                                        ticker=asset.ticker,
-                                    )
-                                else:
-                                    logger.warning(
-                                        "TP ордер исчез (истёк или отменён), перевыставляем",
-                                        ticker=asset.ticker,
-                                        order_id=trade.tp_order_id,
-                                    )
-                                    try:
-                                        price_step = await get_min_price_increment(figi)
-                                        tp_rounded = round_tp_to_step(trade.take_profit_price, price_step)
-                                        tp_resp = await post_limit_order(
-                                            instrument_id=figi,
-                                            quantity=trade.lots,
-                                            price=tp_rounded,
-                                            direction=OrderDirection.ORDER_DIRECTION_SELL,
-                                        )
-                                        trade.tp_order_id = tp_resp.order_id
-                                        await trade_repo.update_trade(session, trade)
-                                        logger.info(
-                                            "TP ордер перевыставлен",
-                                            ticker=asset.ticker,
-                                            order_id=tp_resp.order_id,
-                                            price=str(tp_rounded),
-                                        )
-                                    except Exception as re_e:
-                                        logger.error(
-                                            "Не удалось перевыставить TP ордер",
-                                            ticker=asset.ticker,
-                                            error=str(re_e),
-                                        )
-
-                        # Если SL ордер не был выставлен при открытии (сбой API) — выставляем сейчас
-                        if close_reason is None and not trade.sl_stop_order_id:
-                            if current_price <= trade.stop_loss_price:
-                                close_reason = "STOP_LOSS"
-                            else:
-                                try:
-                                    price_step = await get_min_price_increment(figi)
-                                    sl_rounded = round_sl_to_step(trade.stop_loss_price, price_step)
-                                    new_sl_id = await post_stop_order(
-                                        instrument_id=figi,
-                                        quantity=trade.lots,
-                                        stop_price=sl_rounded,
-                                        direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
-                                    )
-                                    trade.sl_stop_order_id = new_sl_id
-                                    await trade_repo.update_trade(session, trade)
-                                    logger.info(
-                                        "SL стоп-ордер выставлен (не был создан при открытии)",
-                                        ticker=asset.ticker,
-                                        stop_order_id=new_sl_id,
-                                    )
-                                except Exception as re_e:
-                                    logger.error(
-                                        "Не удалось выставить SL стоп-ордер",
-                                        ticker=asset.ticker,
-                                        error=str(re_e),
-                                    )
-
-                        # Проверяем исполнение стоп-ордера SL (пропал из активных → исполнился)
-                        if close_reason is None and trade.sl_stop_order_id and stop_orders_fetched and trade.sl_stop_order_id not in active_stop_ids:
-                            # Дополнительная проверка: если цена выше SL — ордер был
-                            # отменён биржей (не исполнился), а не сработал
-                            if current_price <= trade.stop_loss_price:
-                                close_reason = "STOP_LOSS"
-                            else:
-                                # SL ордер исчез (истёк или отменён биржей) — перевыставляем
-                                logger.warning(
-                                    "SL стоп-ордер исчез, но цена выше SL — перевыставляем",
-                                    ticker=asset.ticker,
-                                    current_price=str(current_price),
-                                    stop_loss_price=str(trade.stop_loss_price),
-                                    sl_stop_order_id=trade.sl_stop_order_id,
-                                )
-                                try:
-                                    price_step = await get_min_price_increment(figi)
-                                    sl_rounded = round_sl_to_step(trade.stop_loss_price, price_step)
-                                    new_sl_id = await post_stop_order(
-                                        instrument_id=figi,
-                                        quantity=trade.lots,
-                                        stop_price=sl_rounded,
-                                        direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
-                                    )
-                                    trade.sl_stop_order_id = new_sl_id
-                                    await trade_repo.update_trade(session, trade)
-                                    logger.info(
-                                        "SL стоп-ордер перевыставлен",
-                                        ticker=asset.ticker,
-                                        stop_order_id=new_sl_id,
-                                    )
-                                except Exception as re_e:
-                                    logger.error(
-                                        "Не удалось перевыставить SL стоп-ордер",
-                                        ticker=asset.ticker,
-                                        error=str(re_e),
-                                    )
-                    else:
-                        # Нет ни TP ни SL ордеров — выставляем оба на бирже
-                        if _is_moex_session_open():
-                            try:
-                                price_step = await get_min_price_increment(figi)
-                                tp_rounded = round_tp_to_step(trade.take_profit_price, price_step)
-                                tp_resp = await post_limit_order(
-                                    instrument_id=figi,
-                                    quantity=trade.lots,
-                                    price=tp_rounded,
-                                    direction=OrderDirection.ORDER_DIRECTION_SELL,
-                                )
-                                trade.tp_order_id = tp_resp.order_id
-                                logger.info(
-                                    "TP ордер выставлен (не был создан при открытии)",
-                                    ticker=asset.ticker,
-                                    order_id=tp_resp.order_id,
-                                    price=str(tp_rounded),
-                                )
-                            except Exception as re_e:
-                                logger.error(
-                                    "Не удалось выставить TP ордер",
-                                    ticker=asset.ticker,
-                                    error=str(re_e),
-                                )
-                        # SL выставляем только если его ещё нет — стоп-ордера
-                        # живут между сессиями и не должны дублироваться
-                        if not trade.sl_stop_order_id:
-                            try:
-                                price_step = await get_min_price_increment(figi)
-                                sl_rounded = round_sl_to_step(trade.stop_loss_price, price_step)
-                                new_sl_id = await post_stop_order(
-                                    instrument_id=figi,
-                                    quantity=trade.lots,
-                                    stop_price=sl_rounded,
-                                    direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
-                                )
-                                trade.sl_stop_order_id = new_sl_id
-                                logger.info(
-                                    "SL стоп-ордер выставлен (не был создан при открытии)",
-                                    ticker=asset.ticker,
-                                    stop_order_id=new_sl_id,
-                                )
-                            except Exception as re_e:
-                                logger.error(
-                                    "Не удалось выставить SL стоп-ордер",
-                                    ticker=asset.ticker,
-                                    error=str(re_e),
-                                )
-                        if trade.tp_order_id or trade.sl_stop_order_id:
-                            await trade_repo.update_trade(session, trade)
-                            continue
+                    close_reason, tp_fill_price, do_continue = await _check_trade_orders(
+                        session=session,
+                        trade=trade,
+                        asset=asset,
+                        figi=figi,
+                        current_price=current_price,
+                        active_stop_ids=active_stop_ids,
+                        active_order_ids=active_order_ids,
+                        stop_orders_fetched=stop_orders_fetched,
+                        limit_orders_fetched=limit_orders_fetched,
+                    )
+                    if do_continue:
+                        continue
 
                         # Фолбэк: не удалось выставить ордера — сравниваем цену
                         dividend_adj = dividend_drops.get(figi, Decimal("0"))
@@ -837,6 +683,211 @@ async def _update_candles() -> None:
             logger.debug("Redis-кеш свечей и сигналов инвалидирован")
     except Exception as e:
         logger.warning("Ошибка инвалидации Redis-кеша после обновления свечей", error=str(e))
+
+
+async def _check_trade_orders(
+    session: "AsyncSession",
+    trade: "Trade",
+    asset: "Asset",
+    figi: str,
+    current_price: Decimal,
+    active_stop_ids: set[str],
+    active_order_ids: set[str],
+    stop_orders_fetched: bool,
+    limit_orders_fetched: bool,
+) -> tuple[str | None, Decimal | None, bool]:
+    """
+    Проверить статус биржевых ордеров для одной открытой позиции.
+
+    Обрабатывает TP стоп-ордер, legacy TP лимитный ордер, SL стоп-ордер.
+    При необходимости перевыставляет пропавшие ордера.
+
+    Аргументы:
+        session:             AsyncSession для записи в БД
+        trade:               открытая сделка
+        asset:               актив сделки
+        figi:                FIGI инструмента
+        current_price:       текущая рыночная цена
+        active_stop_ids:     множество ID активных стоп-ордеров
+        active_order_ids:    множество ID активных лимитных ордеров (legacy)
+        stop_orders_fetched: успешно ли получены стоп-ордера
+        limit_orders_fetched: успешно ли получены лимитные ордера
+
+    Возвращает:
+        Кортеж (close_reason, tp_fill_price, do_continue):
+            close_reason  — "TAKE_PROFIT" / "STOP_LOSS" / None
+            tp_fill_price — цена исполнения TP или None
+            do_continue   — True если нужно перейти к следующему trade без закрытия
+    """
+    close_reason: str | None = None
+    tp_fill_price: Decimal | None = None
+
+    # ── Проверка TP стоп-ордера (новый формат) ───────────────────────────────
+    if trade.tp_stop_order_id:
+        tp_stop_gone = stop_orders_fetched and trade.tp_stop_order_id not in active_stop_ids
+        if tp_stop_gone:
+            # Ценовой признак: стоп-ордера не имеют API-статуса исполнения
+            if current_price >= trade.take_profit_price:
+                close_reason = "TAKE_PROFIT"
+                tp_fill_price = trade.take_profit_price
+            else:
+                logger.warning(
+                    "TP стоп-ордер исчез, цена ниже TP — перевыставляем",
+                    ticker=asset.ticker,
+                    tp_stop_order_id=trade.tp_stop_order_id,
+                    current_price=str(current_price),
+                    take_profit_price=str(trade.take_profit_price),
+                )
+                try:
+                    price_step = await get_min_price_increment(figi)
+                    tp_rounded = round_tp_to_step(trade.take_profit_price, price_step)
+                    new_tp_stop_id = await post_stop_order(
+                        instrument_id=figi,
+                        quantity=trade.lots,
+                        stop_price=tp_rounded,
+                        direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                        stop_order_type=StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT,
+                    )
+                    trade.tp_stop_order_id = new_tp_stop_id
+                    await trade_repo.update_trade(session, trade)
+                    logger.info("TP стоп-ордер перевыставлен", ticker=asset.ticker,
+                                stop_order_id=new_tp_stop_id, price=str(tp_rounded))
+                except Exception as re_e:
+                    logger.error("Не удалось перевыставить TP стоп-ордер",
+                                 ticker=asset.ticker, error=str(re_e))
+
+    # ── Проверка TP лимитного ордера (legacy) ────────────────────────────────
+    elif trade.tp_order_id:
+        tp_gone = limit_orders_fetched and trade.tp_order_id not in active_order_ids
+        if tp_gone:
+            try:
+                tp_status, tp_fill_price = await get_order_state(trade.tp_order_id)
+                if tp_status == OrderExecutionReportStatus.EXECUTION_REPORT_STATUS_FILL:
+                    close_reason = "TAKE_PROFIT"
+            except Exception:
+                pass  # ордер заархивирован — считаем истёкшим
+            if close_reason != "TAKE_PROFIT":
+                if not _is_moex_session_open():
+                    trade.tp_order_id = None
+                    await trade_repo.update_trade(session, trade)
+                    logger.debug("Legacy TP лимит-ордер исчез, биржа закрыта — ID очищен",
+                                 ticker=asset.ticker)
+                else:
+                    logger.warning("Legacy TP лимит-ордер исчез — перевыставляем как стоп-TP",
+                                   ticker=asset.ticker, order_id=trade.tp_order_id)
+                    try:
+                        price_step = await get_min_price_increment(figi)
+                        tp_rounded = round_tp_to_step(trade.take_profit_price, price_step)
+                        new_tp_stop_id = await post_stop_order(
+                            instrument_id=figi,
+                            quantity=trade.lots,
+                            stop_price=tp_rounded,
+                            direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                            stop_order_type=StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT,
+                        )
+                        trade.tp_order_id = None
+                        trade.tp_stop_order_id = new_tp_stop_id
+                        await trade_repo.update_trade(session, trade)
+                        logger.info("Legacy TP мигрирован на стоп-TP", ticker=asset.ticker,
+                                    stop_order_id=new_tp_stop_id, price=str(tp_rounded))
+                    except Exception as re_e:
+                        logger.error("Не удалось перевыставить TP как стоп-ордер",
+                                     ticker=asset.ticker, error=str(re_e))
+
+    # ── Если SL не был выставлен при открытии (сбой API) ─────────────────────
+    if close_reason is None and not trade.sl_stop_order_id:
+        if current_price <= trade.stop_loss_price:
+            close_reason = "STOP_LOSS"
+        else:
+            try:
+                price_step = await get_min_price_increment(figi)
+                sl_rounded = round_sl_to_step(trade.stop_loss_price, price_step)
+                new_sl_id = await post_stop_order(
+                    instrument_id=figi,
+                    quantity=trade.lots,
+                    stop_price=sl_rounded,
+                    direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                    stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
+                )
+                trade.sl_stop_order_id = new_sl_id
+                await trade_repo.update_trade(session, trade)
+                logger.info("SL стоп-ордер выставлен (не был создан при открытии)",
+                            ticker=asset.ticker, stop_order_id=new_sl_id)
+            except Exception as re_e:
+                logger.error("Не удалось выставить SL стоп-ордер",
+                             ticker=asset.ticker, error=str(re_e))
+
+    # ── Проверяем исполнение SL стоп-ордера ───────────────────────────────────
+    if (close_reason is None and trade.sl_stop_order_id
+            and stop_orders_fetched and trade.sl_stop_order_id not in active_stop_ids):
+        if current_price <= trade.stop_loss_price:
+            close_reason = "STOP_LOSS"
+        else:
+            logger.warning(
+                "SL стоп-ордер исчез, но цена выше SL — перевыставляем",
+                ticker=asset.ticker,
+                current_price=str(current_price),
+                stop_loss_price=str(trade.stop_loss_price),
+                sl_stop_order_id=trade.sl_stop_order_id,
+            )
+            try:
+                price_step = await get_min_price_increment(figi)
+                sl_rounded = round_sl_to_step(trade.stop_loss_price, price_step)
+                new_sl_id = await post_stop_order(
+                    instrument_id=figi,
+                    quantity=trade.lots,
+                    stop_price=sl_rounded,
+                    direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                    stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
+                )
+                trade.sl_stop_order_id = new_sl_id
+                await trade_repo.update_trade(session, trade)
+                logger.info("SL стоп-ордер перевыставлен", ticker=asset.ticker,
+                            stop_order_id=new_sl_id)
+            except Exception as re_e:
+                logger.error("Не удалось перевыставить SL стоп-ордер",
+                             ticker=asset.ticker, error=str(re_e))
+
+    # ── Нет ни TP ни SL — выставляем оба ─────────────────────────────────────
+    if close_reason is None and not trade.tp_stop_order_id and not trade.tp_order_id and not trade.sl_stop_order_id:
+        try:
+            price_step = await get_min_price_increment(figi)
+            tp_rounded = round_tp_to_step(trade.take_profit_price, price_step)
+            new_tp_stop_id = await post_stop_order(
+                instrument_id=figi,
+                quantity=trade.lots,
+                stop_price=tp_rounded,
+                direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                stop_order_type=StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT,
+            )
+            trade.tp_stop_order_id = new_tp_stop_id
+            logger.info("TP стоп-ордер выставлен (не был создан при открытии)",
+                        ticker=asset.ticker, stop_order_id=new_tp_stop_id, price=str(tp_rounded))
+        except Exception as re_e:
+            logger.error("Не удалось выставить TP стоп-ордер", ticker=asset.ticker, error=str(re_e))
+        if not trade.sl_stop_order_id:
+            try:
+                price_step = await get_min_price_increment(figi)
+                sl_rounded = round_sl_to_step(trade.stop_loss_price, price_step)
+                new_sl_id = await post_stop_order(
+                    instrument_id=figi,
+                    quantity=trade.lots,
+                    stop_price=sl_rounded,
+                    direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                    stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
+                )
+                trade.sl_stop_order_id = new_sl_id
+                logger.info("SL стоп-ордер выставлен (не был создан при открытии)",
+                            ticker=asset.ticker, stop_order_id=new_sl_id)
+            except Exception as re_e:
+                logger.error("Не удалось выставить SL стоп-ордер", ticker=asset.ticker, error=str(re_e))
+        if trade.tp_stop_order_id or trade.sl_stop_order_id:
+            await trade_repo.update_trade(session, trade)
+            return None, None, True  # do_continue=True
+
+        return None, None, False  # нет ордеров и не удалось выставить → фолбэк
+
+    return close_reason, tp_fill_price, False
 
 
 async def _get_lot_size(ticker: str) -> int:

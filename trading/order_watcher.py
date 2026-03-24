@@ -2,14 +2,14 @@
 Мониторинг исполнения ордеров в реальном времени.
 
 Два параллельных механизма:
-- gRPC stream (trades_stream): мгновенно обрабатывает TP (лимитные ордера).
-  Матчинг по order_id: как только биржа исполняет лимитный ордер TP,
-  бот отменяет SL и закрывает позицию в БД без ожидания следующего тика.
+- gRPC stream (trades_stream): мгновенно обрабатывает TP для старых позиций
+  с tp_order_id (лимитный ордер). Матчинг по order_id.
 
 - Быстрый polling (каждые TRADING_ORDER_POLL_SECONDS секунд): проверяет SL
-  стоп-ордера. Стоп-ордер при срабатывании создаёт НОВЫЙ рыночный ордер с
-  другим ID, поэтому его нельзя поймать через stream по order_id.
-  Вместо этого: если sl_stop_order_id исчез из активных + цена ≤ SL → закрыть.
+  и TP для новых позиций (tp_stop_order_id).
+  - SL-стоп: при срабатывании создаёт НОВЫЙ рыночный ордер с другим ID —
+    матчинг через stream невозможен. Признак: stop_order_id исчез + цена <= SL.
+  - TP-стоп: аналогично. Признак: stop_order_id исчез + цена >= TP.
 
 Оба механизма переподключаются при сбое. Конкурентность со scheduler решается
 через повторное чтение статуса сделки из БД перед закрытием.
@@ -52,7 +52,7 @@ class OrderWatcher:
             self._poll_loop(),
         )
 
-    # ── gRPC stream: мгновенное обнаружение TP ────────────────────────────────
+    # ── gRPC stream: мгновенное обнаружение legacy TP (лимитный ордер) ────────
 
     async def _stream_loop(self) -> None:
         """Бесконечный цикл подключения к trades_stream с переподключением."""
@@ -99,11 +99,13 @@ class OrderWatcher:
         """
         Обработать исполнение ордера из stream.
 
-        Проверяет, является ли order_id тейк-профитом одной из открытых позиций.
-        Если да — отменяет SL, закрывает позицию в БД, отправляет уведомление.
+        Проверяет, является ли order_id тейк-профитом одной из открытых позиций
+        (только для legacy tp_order_id — лимитные ордера).
+        Новые позиции с tp_stop_order_id обрабатываются через polling (_check_tp_sl).
         """
         async with get_session() as session:
             open_trades = await trade_repo.get_open_trades(session)
+            # Матчинг только по legacy tp_order_id (лимитный ордер)
             trade = next((t for t in open_trades if t.tp_order_id == order_id), None)
             if trade is None:
                 return
@@ -114,7 +116,7 @@ class OrderWatcher:
                 return
 
             logger.info(
-                "OrderWatcher: TP исполнен (stream)",
+                "OrderWatcher: legacy TP исполнен (stream)",
                 ticker=asset.ticker,
                 trade_id=trade.id,
                 order_id=order_id,
@@ -127,7 +129,7 @@ class OrderWatcher:
                     await cancel_stop_order(trade.sl_stop_order_id)
                 except Exception as e:
                     logger.warning(
-                        "OrderWatcher: не удалось отменить SL после TP",
+                        "OrderWatcher: не удалось отменить SL после legacy TP",
                         stop_order_id=trade.sl_stop_order_id,
                         error=str(e),
                     )
@@ -161,30 +163,36 @@ class OrderWatcher:
                 tax=breakdown.tax,
             )
 
-    # ── Быстрый polling: обнаружение SL ──────────────────────────────────────
+    # ── Быстрый polling: обнаружение SL и нового TP стоп-ордера ──────────────
 
     async def _poll_loop(self) -> None:
-        """Проверять SL стоп-ордера каждые TRADING_ORDER_POLL_SECONDS секунд."""
+        """Проверять SL и TP стоп-ордера каждые TRADING_ORDER_POLL_SECONDS секунд."""
         interval = trading_settings.order_poll_seconds
-        logger.info("OrderWatcher: polling SL запущен", interval_seconds=interval)
+        logger.info("OrderWatcher: polling SL/TP запущен", interval_seconds=interval)
         while True:
             await asyncio.sleep(interval)
             try:
-                await self._check_sl()
+                await self._check_tp_sl()
             except Exception as e:
-                logger.warning("OrderWatcher: ошибка проверки SL", error=str(e))
+                logger.warning("OrderWatcher: ошибка проверки SL/TP", error=str(e))
 
-    async def _check_sl(self) -> None:
+    async def _check_tp_sl(self) -> None:
         """
-        Проверить, не сработал ли SL стоп-ордер для открытых позиций.
+        Проверить исполнение SL и TP стоп-ордеров для открытых позиций.
 
-        Логика: если sl_stop_order_id исчез из активных стоп-ордеров
-        И текущая цена ≤ stop_loss_price → SL сработал на бирже.
+        Логика SL: sl_stop_order_id исчез из активных + цена <= stop_loss_price.
+        Логика TP (стоп): tp_stop_order_id исчез из активных + цена >= take_profit_price.
+
+        Для legacy tp_order_id (лимитный ордер) — обрабатывается через stream.
         """
         async with get_session() as session:
             open_trades = await trade_repo.get_open_trades(session)
-            trades_with_sl = [t for t in open_trades if t.sl_stop_order_id]
-            if not trades_with_sl:
+            # Нас интересуют позиции хотя бы с одним стоп-ордером (SL или TP-стоп)
+            trades_with_stops = [
+                t for t in open_trades
+                if t.sl_stop_order_id or t.tp_stop_order_id
+            ]
+            if not trades_with_stops:
                 return
 
             # Загружаем активные стоп-ордера и текущие цены
@@ -198,7 +206,11 @@ class OrderWatcher:
             all_assets = {a.id: a for a in result.scalars().all()}
             asset_to_figi = {a.id: a.figi for a in all_assets.values()}
 
-            figis = [asset_to_figi[t.asset_id] for t in trades_with_sl if t.asset_id in asset_to_figi]
+            figis = [
+                asset_to_figi[t.asset_id]
+                for t in trades_with_stops
+                if t.asset_id in asset_to_figi
+            ]
             if not figis:
                 return
 
@@ -208,10 +220,7 @@ class OrderWatcher:
                 logger.warning("OrderWatcher: не удалось получить цены", error=str(e))
                 return
 
-            for trade in trades_with_sl:
-                if trade.sl_stop_order_id in active_stop_ids:
-                    continue  # SL ещё активен
-
+            for trade in trades_with_stops:
                 figi = asset_to_figi.get(trade.asset_id)
                 if not figi:
                     continue
@@ -220,13 +229,72 @@ class OrderWatcher:
                 if current_price <= 0:
                     continue
 
+                asset = all_assets.get(trade.asset_id)
+                if asset is None:
+                    continue
+
+                # ── Проверка TP стоп-ордера ────────────────────────────────
+                if trade.tp_stop_order_id and trade.tp_stop_order_id not in active_stop_ids:
+                    if current_price >= trade.take_profit_price:
+                        # TP стоп-ордер исчез и цена >= TP → TP исполнился
+                        logger.info(
+                            "OrderWatcher: TP стоп-ордер сработал (polling)",
+                            ticker=asset.ticker,
+                            trade_id=trade.id,
+                            current_price=str(current_price),
+                            take_profit_price=str(trade.take_profit_price),
+                        )
+
+                        # Отменяем SL стоп-ордер
+                        if trade.sl_stop_order_id:
+                            try:
+                                await cancel_stop_order(trade.sl_stop_order_id)
+                            except Exception as e:
+                                logger.warning(
+                                    "OrderWatcher: не удалось отменить SL после TP",
+                                    stop_order_id=trade.sl_stop_order_id,
+                                    error=str(e),
+                                )
+
+                        exit_price = current_price
+                        lot_size = getattr(trade, "lot_size", 1) or 1
+                        breakdown = calculate_pnl(
+                            entry_price=trade.entry_price,
+                            exit_price=exit_price,
+                            lots=trade.lots,
+                            lot_size=lot_size,
+                        )
+
+                        # Закрываем в БД (биржа уже продала через стоп-TP)
+                        trade.exit_price = exit_price
+                        trade.status = "CLOSED"
+                        trade.close_reason = "TAKE_PROFIT"
+                        trade.pnl = breakdown.net_pnl
+                        from datetime import datetime, timezone
+                        trade.closed_at = datetime.now(timezone.utc)
+                        await trade_repo.update_trade(session, trade)
+
+                        await notify_close(
+                            ticker=asset.ticker,
+                            entry_price=trade.entry_price,
+                            exit_price=exit_price,
+                            reason="TAKE_PROFIT",
+                            net_pnl=breakdown.net_pnl,
+                            gross_pnl=breakdown.gross_pnl,
+                            commission=breakdown.buy_commission + breakdown.sell_commission,
+                            tax=breakdown.tax,
+                        )
+                        continue  # позиция закрыта — следующий trade
+
+                # ── Проверка SL стоп-ордера ────────────────────────────────
+                if not trade.sl_stop_order_id:
+                    continue
+                if trade.sl_stop_order_id in active_stop_ids:
+                    continue  # SL ещё активен
+
                 if current_price > trade.stop_loss_price:
                     # Стоп-ордер исчез, но цена выше SL — не SL, игнорируем
                     # (scheduler обработает перевыставление на следующем тике)
-                    continue
-
-                asset = all_assets.get(trade.asset_id)
-                if asset is None:
                     continue
 
                 logger.info(
@@ -237,13 +305,22 @@ class OrderWatcher:
                     stop_loss_price=str(trade.stop_loss_price),
                 )
 
-                # Отменяем TP лимитный ордер
+                # Отменяем TP стоп-ордер (новый формат) или лимитный (legacy)
+                if trade.tp_stop_order_id:
+                    try:
+                        await cancel_stop_order(trade.tp_stop_order_id)
+                    except Exception as e:
+                        logger.warning(
+                            "OrderWatcher: не удалось отменить TP стоп-ордер после SL",
+                            stop_order_id=trade.tp_stop_order_id,
+                            error=str(e),
+                        )
                 if trade.tp_order_id:
                     try:
                         await cancel_order(trade.tp_order_id)
                     except Exception as e:
                         logger.warning(
-                            "OrderWatcher: не удалось отменить TP после SL",
+                            "OrderWatcher: не удалось отменить legacy TP после SL",
                             order_id=trade.tp_order_id,
                             error=str(e),
                         )

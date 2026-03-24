@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from sqlalchemy.ext.asyncio import AsyncSession
-from t_tech.invest.schemas import OrderDirection, StopOrderDirection
+from t_tech.invest.schemas import OrderDirection, StopOrderDirection, StopOrderType
 from t_tech.invest.utils import quotation_to_decimal
 
 from config.settings import trading_settings
@@ -19,7 +19,6 @@ from tinkoff.market_data import get_min_price_increment
 from tinkoff.portfolio import (
     cancel_order,
     cancel_stop_order,
-    post_limit_order,
     post_market_order,
     post_stop_order,
 )
@@ -119,8 +118,11 @@ class TradeExecutor:
         )
         trade = await trade_repo.save_trade(session, trade)
 
-        # Выставляем биржевые ордера TP и SL сразу после покупки
-        tp_order_id: str | None = None
+        # Выставляем биржевые стоп-ордера TP и SL сразу после покупки.
+        # Оба используют post_stop_order — стоп-ордера не блокируют акции
+        # в портфеле до момента срабатывания, устраняя OCO-конфликт
+        # "Недостаточно бумаг в портфеле".
+        tp_stop_order_id: str | None = None
         sl_stop_order_id: str | None = None
 
         # Округляем цены до минимального шага инструмента (требование Tinkoff API)
@@ -134,14 +136,17 @@ class TradeExecutor:
         sl_price_rounded = round_sl_to_step(stop_loss_price, price_step)
 
         try:
-            tp_order_id = (await post_limit_order(
+            # TP как STOP_ORDER_TYPE_TAKE_PROFIT: срабатывает когда цена >= tp_price.
+            # Стоп-ордер не резервирует акции — нет конфликта с SL стоп-ордером.
+            tp_stop_order_id = await post_stop_order(
                 instrument_id=instrument_uid,
                 quantity=_lots,
-                price=tp_price_rounded,
-                direction=OrderDirection.ORDER_DIRECTION_SELL,
-            )).order_id
+                stop_price=tp_price_rounded,
+                direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                stop_order_type=StopOrderType.STOP_ORDER_TYPE_TAKE_PROFIT,
+            )
         except Exception as e:
-            logger.warning("Не удалось выставить лимитный ордер TP", ticker=asset.ticker, error=str(e))
+            logger.warning("Не удалось выставить стоп-ордер TP", ticker=asset.ticker, error=str(e))
 
         try:
             sl_stop_order_id = await post_stop_order(
@@ -149,12 +154,13 @@ class TradeExecutor:
                 quantity=_lots,
                 stop_price=sl_price_rounded,
                 direction=StopOrderDirection.STOP_ORDER_DIRECTION_SELL,
+                stop_order_type=StopOrderType.STOP_ORDER_TYPE_STOP_LOSS,
             )
         except Exception as e:
             logger.warning("Не удалось выставить стоп-ордер SL", ticker=asset.ticker, error=str(e))
 
-        if tp_order_id or sl_stop_order_id:
-            trade.tp_order_id = tp_order_id
+        if tp_stop_order_id or sl_stop_order_id:
+            trade.tp_stop_order_id = tp_stop_order_id
             trade.sl_stop_order_id = sl_stop_order_id
             trade = await trade_repo.update_trade(session, trade)
 
@@ -170,7 +176,7 @@ class TradeExecutor:
             tp_pct=round(_tp_pct, 4),
             stop_loss=str(sl_price_rounded),
             take_profit=str(tp_price_rounded),
-            tp_order_id=tp_order_id,
+            tp_stop_order_id=tp_stop_order_id,
             sl_stop_order_id=sl_stop_order_id,
         )
         return trade
@@ -215,27 +221,68 @@ class TradeExecutor:
         # - SL сработал → отменяем TP (позицию уже закрыла биржа через SL)
         # - TP сработал → отменяем SL (позицию уже закрыла биржа через TP)
         # - Иной сигнал  → отменяем оба, затем выставляем рыночный SELL
-        if reason == "STOP_LOSS" and trade.tp_order_id:
-            try:
-                await cancel_order(trade.tp_order_id)
-            except Exception as e:
-                logger.warning("Не удалось отменить TP ордер после SL", order_id=trade.tp_order_id, error=str(e))
-        elif reason == "TAKE_PROFIT" and trade.sl_stop_order_id:
-            try:
-                await cancel_stop_order(trade.sl_stop_order_id)
-            except Exception as e:
-                logger.warning("Не удалось отменить SL стоп-ордер после TP", stop_order_id=trade.sl_stop_order_id, error=str(e))
-        else:
+        #
+        # Backward compatibility: tp_order_id — старый лимитный ордер (cancel_order),
+        # tp_stop_order_id — новый стоп-ордер TAKE_PROFIT (cancel_stop_order).
+        if reason == "STOP_LOSS":
+            # Отменяем TP (новый стоп-TP или старый лимитный)
+            if trade.tp_stop_order_id:
+                try:
+                    await cancel_stop_order(trade.tp_stop_order_id)
+                except Exception as e:
+                    logger.warning(
+                        "Не удалось отменить TP стоп-ордер после SL",
+                        stop_order_id=trade.tp_stop_order_id,
+                        error=str(e),
+                    )
             if trade.tp_order_id:
                 try:
                     await cancel_order(trade.tp_order_id)
                 except Exception as e:
-                    logger.warning("Не удалось отменить TP ордер", order_id=trade.tp_order_id, error=str(e))
+                    logger.warning(
+                        "Не удалось отменить TP лимитный ордер после SL (legacy)",
+                        order_id=trade.tp_order_id,
+                        error=str(e),
+                    )
+        elif reason == "TAKE_PROFIT":
             if trade.sl_stop_order_id:
                 try:
                     await cancel_stop_order(trade.sl_stop_order_id)
                 except Exception as e:
-                    logger.warning("Не удалось отменить SL стоп-ордер", stop_order_id=trade.sl_stop_order_id, error=str(e))
+                    logger.warning(
+                        "Не удалось отменить SL стоп-ордер после TP",
+                        stop_order_id=trade.sl_stop_order_id,
+                        error=str(e),
+                    )
+        else:
+            # SELL_SIGNAL или MANUAL: отменяем оба
+            if trade.tp_stop_order_id:
+                try:
+                    await cancel_stop_order(trade.tp_stop_order_id)
+                except Exception as e:
+                    logger.warning(
+                        "Не удалось отменить TP стоп-ордер",
+                        stop_order_id=trade.tp_stop_order_id,
+                        error=str(e),
+                    )
+            if trade.tp_order_id:
+                try:
+                    await cancel_order(trade.tp_order_id)
+                except Exception as e:
+                    logger.warning(
+                        "Не удалось отменить TP лимитный ордер (legacy)",
+                        order_id=trade.tp_order_id,
+                        error=str(e),
+                    )
+            if trade.sl_stop_order_id:
+                try:
+                    await cancel_stop_order(trade.sl_stop_order_id)
+                except Exception as e:
+                    logger.warning(
+                        "Не удалось отменить SL стоп-ордер",
+                        stop_order_id=trade.sl_stop_order_id,
+                        error=str(e),
+                    )
 
         # Если TP исполнился на бирже (подтверждено через get_order_state + FILL) —
         # позиция уже закрыта биржей, рыночный ордер выставлять не нужно.
