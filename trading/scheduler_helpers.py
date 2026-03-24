@@ -57,7 +57,9 @@ def _apply_regime_filter(lots: int, regime: int) -> int:
     if regime == 0:
         if ts.regime_filter_mode == "hard":
             return 0
-        return max(0, int(lots * ts.regime_flat_lots_multiplier))
+        if ts.regime_flat_lots_multiplier <= 0:
+            return 0
+        return max(1, int(lots * ts.regime_flat_lots_multiplier))
     return lots
 
 
