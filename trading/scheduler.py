@@ -429,7 +429,7 @@ class TradingScheduler:
                         logger.debug(
                             "Уверенность ниже порога",
                             ticker=ticker,
-                            buy_proba=buy_proba,
+                            confidence=buy_confidence,
                             threshold=ticker_threshold,
                         )
                         continue
