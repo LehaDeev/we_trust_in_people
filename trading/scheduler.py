@@ -524,14 +524,23 @@ class TradingScheduler:
                             gross_pnl=str(breakdown.gross_pnl),
                             net_pnl=str(breakdown.net_pnl),
                         )
-                        closed_trade = await self._executor.close_position(
-                            session=session,
-                            trade=trade,
-                            asset=asset,
-                            instrument_uid=figi,
-                            current_price=exit_price_for_pnl,
-                            reason=close_reason,
-                        )
+                        try:
+                            closed_trade = await self._executor.close_position(
+                                session=session,
+                                trade=trade,
+                                asset=asset,
+                                instrument_uid=figi,
+                                current_price=exit_price_for_pnl,
+                                reason=close_reason,
+                            )
+                        except Exception as close_err:
+                            logger.error(
+                                "Ошибка закрытия позиции — сделка остаётся открытой в БД",
+                                ticker=asset.ticker,
+                                reason=close_reason,
+                                error=str(close_err),
+                            )
+                            continue
                         open_by_asset.pop(trade.asset_id, None)
                         # Пересчитываем breakdown от фактической цены исполнения
                         actual_exit = closed_trade.exit_price or exit_price_for_pnl

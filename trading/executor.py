@@ -237,10 +237,11 @@ class TradeExecutor:
                 except Exception as e:
                     logger.warning("Не удалось отменить SL стоп-ордер", stop_order_id=trade.sl_stop_order_id, error=str(e))
 
-        # Если TP/SL сработал на бирже — позиция уже закрыта биржей,
-        # рыночный ордер выставлять не нужно
-        if reason in ("TAKE_PROFIT", "STOP_LOSS") and trade.tp_order_id:
-            # Позиция закрыта биржей, используем текущую цену как цену выхода
+        # Если TP исполнился на бирже (подтверждено через get_order_state + FILL) —
+        # позиция уже закрыта биржей, рыночный ордер выставлять не нужно.
+        # Для STOP_LOSS всегда выставляем рыночный SELL: стоп-ордер мог не исполниться
+        # (например, биржа вернула "Недостаточно бумаг") и акции остались в портфеле.
+        if reason == "TAKE_PROFIT":
             pass
         else:
             try:
@@ -256,12 +257,12 @@ class TradeExecutor:
                         pass
             except Exception as e:
                 logger.error(
-                    "Ошибка выставления ордера SELL",
+                    "Ошибка выставления ордера SELL — позиция НЕ закрыта в БД",
                     ticker=asset.ticker,
                     trade_id=trade.id,
                     error=str(e),
                 )
-                exit_price = current_price
+                raise
 
         # Чистый PnL: учитываем комиссии и НДФЛ
         lot_size = getattr(trade, "lot_size", 1) or 1
