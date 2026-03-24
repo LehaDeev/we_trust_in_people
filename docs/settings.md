@@ -105,9 +105,9 @@
 | `TRADING_CANDLE_UPDATE_PAUSE_SECONDS` | Пауза между тикерами при внутрисессионном обновлении свечей (сек) | `3` |
 | `TRADING_DYNAMIC_SLTP_ENABLED` | Включить динамические SL/TP на основе ATR. При `false` — используются фиксированные `STOP_LOSS_PCT`/`TAKE_PROFIT_PCT` | `true` |
 | `TRADING_ATR_SL_MULTIPLIER` | Множитель ATR для расчёта SL: `sl = clamp(atr_ratio × mult, min, max)`. Рекомендуется 1.5–2.5 для часовых свечей | `2.0` |
-| `TRADING_ATR_RISK_REWARD_RATIO` | Соотношение RR: `tp = sl × ratio`. `1.67` ≈ 5:3; `2.0` = классический 2:1 | `1.67` |
+| `TRADING_ATR_RISK_REWARD_RATIO` | Соотношение RR: `tp = sl × ratio`. `1.5` → breakeven ~43% win rate; `2.0` = классический 2:1 | `1.5` |
 | `TRADING_ATR_MIN_SL_PCT` | Минимальный SL при ATR-расчёте (защита от узких стопов при тихом рынке) | `0.015` |
-| `TRADING_ATR_MAX_SL_PCT` | Максимальный SL при ATR-расчёте (ограничение потерь при кризисной волатильности) | `0.05` |
+| `TRADING_ATR_MAX_SL_PCT` | Максимальный SL при ATR-расчёте (ограничение потерь при кризисной волатильности) | `0.04` |
 | `TRADING_REGIME_FILTER_ENABLED` | Включить фильтр рыночного режима при открытии BUY. `false` = отключить (backward compat) | `true` |
 | `TRADING_REGIME_FILTER_MODE` | `soft` = уменьшать лоты в флете; `hard` = блокировать BUY в флете и даунтренде | `soft` |
 | `TRADING_REGIME_FLAT_MULTIPLIER` | Множитель лотов в флете при режиме `soft`. `0.5` = вдвое меньше; `0.0` = блокировать; `1.0` = без ограничений | `0.5` |
