@@ -90,11 +90,15 @@ class TradeExecutor:
             )
             return None
 
-        # Цена исполнения из ответа API (если доступна), иначе текущая цена
+        # Цена исполнения из ответа API (если доступна и > 0), иначе текущая цена.
+        # Tinkoff может вернуть Quotation(units=0, nano=0) для неисполненных ордеров —
+        # объект не None, но конвертируется в 0. Проверяем > 0 перед использованием.
         executed_price = current_price
         if response.executed_order_price:
             try:
-                executed_price = quotation_to_decimal(response.executed_order_price)
+                ep = quotation_to_decimal(response.executed_order_price)
+                if ep > 0:
+                    executed_price = ep
             except Exception:
                 pass
 
