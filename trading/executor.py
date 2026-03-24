@@ -284,11 +284,13 @@ class TradeExecutor:
                         error=str(e),
                     )
 
-        # Если TP исполнился на бирже (подтверждено через get_order_state + FILL) —
-        # позиция уже закрыта биржей, рыночный ордер выставлять не нужно.
-        # Для STOP_LOSS всегда выставляем рыночный SELL: стоп-ордер мог не исполниться
-        # (например, биржа вернула "Недостаточно бумаг") и акции остались в портфеле.
-        if reason == "TAKE_PROFIT":
+        # Новая схема (tp_stop_order_id): оба ордера — стоп-ордера, биржа закрывает
+        # позицию сама при срабатывании TP или SL → market sell не нужен.
+        # Старая схема (tp_order_id, без tp_stop_order_id): TP был лимитным ордером,
+        # при STOP_LOSS мог возникнуть OCO-конфликт → позиция не закрыта биржей
+        # → нужен market sell.
+        exchange_closed = reason in ("TAKE_PROFIT", "STOP_LOSS") and not trade.tp_order_id
+        if exchange_closed:
             pass
         else:
             try:
